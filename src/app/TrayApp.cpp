@@ -829,9 +829,17 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // Retry controller discovery on the timer as well. On cold boot the
             // first open attempt can race HID initialization, and there may be
             // no later arrival event if the controller was already present.
+            //
+            // Gated on may-own: while an auto mode is yielding, ReleaseDevices
+            // has left us disconnected, so an ungated retry would reopen the
+            // device and ApplySteamState would immediately close it again —
+            // open/close churn every RECONNECT_BACKOFF_MS for the whole game
+            // session, right when we are supposed to be staying out of the way.
             const ULONGLONG now = GetTickCount64();
-            if (m_controller->IsConnected() ||
-                (now - m_lastReconnectAttemptTick) >= RECONNECT_BACKOFF_MS) {
+            const bool mayOwn = (m_autoMode == AutoMode::Manual) || WantControl(m_steamState);
+            if (mayOwn &&
+                (m_controller->IsConnected() ||
+                 (now - m_lastReconnectAttemptTick) >= RECONNECT_BACKOFF_MS)) {
                 m_lastReconnectAttemptTick = now;
                 m_controller->OnDeviceChange();
                 ReconcileAutoMode();
