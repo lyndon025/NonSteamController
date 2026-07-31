@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 class SteamController {
 public:
@@ -131,10 +132,39 @@ public:
     SteamController(const SteamController&) = delete;
     SteamController& operator=(const SteamController&) = delete;
 
-    // Finds and opens the vendor HID interface. Returns false if not found.
+    // A vendor HID interface that might carry a controller.
+    struct Candidate {
+        std::wstring path;         // HID interface path to open
+        std::wstring physicalKey;  // DeviceIdentity key of the owning USB device
+        uint16_t     pid   = 0;    // SC2026_PID (wired) or SC2026_DONGLE_PID
+        bool         wired = false;
+    };
+
+    // Every vendor HID interface worth trying, wired before dongle.
+    //
+    // Interfaces are NOT collapsed per physical device: the dongle's pairing
+    // slots all belong to one USB device, so doing that would hide controllers.
+    // Whether an interface actually has a controller on it is settled by
+    // Open(), which probes for a live report.
+    //
+    // Opens and probes nothing itself, so this is safe to call while slots hold
+    // devices open — it lets multi-controller support ask "what is out there?"
+    // without disturbing anything already running.
+    static std::vector<Candidate> EnumerateCandidates();
+
+    // Opens a specific interface and confirms it is live by waiting briefly for
+    // a state-shaped input report. Returns false (leaving nothing open) when the
+    // interface is silent — an unpaired or sleeping dongle slot, typically, or a
+    // controller that is currently talking over USB instead.
+    bool Open(const Candidate& candidate);
+
+    // Finds and opens the first live vendor HID interface. False if none.
     bool Open();
     void Close();
     bool IsOpen() const { return m_device.IsOpen(); }
+
+    // Path this instance currently has open, or empty.
+    const std::wstring& DevicePath() const { return m_devicePath; }
 
     // Two-step sequence: clears digital mappings + sets trackpads to NONE.
     // Starts the background heartbeat thread on first call.
@@ -169,6 +199,7 @@ private:
     bool ApplyTrackpadMouseSettings();
 
     HidDevice          m_device;
+    std::wstring       m_devicePath;
     std::thread        m_heartbeat;
     std::thread        m_rumbleThread;
     std::mutex         m_featureMutex;

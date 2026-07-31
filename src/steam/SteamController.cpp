@@ -1,12 +1,16 @@
 #include "SteamController.h"
+#include "hid/DeviceIdentity.h"
 #include "logging/Log.h"
+#include <algorithm>
 #include <chrono>
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <cwctype>
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Internal helper: build a 64-byte feature report command buffer.
@@ -114,45 +118,91 @@ SteamController::InputReportKind SteamController::ClassifyInputReport(const uint
 // Open / Close
 // ---------------------------------------------------------------------------
 
-bool SteamController::Open() {
-    logging::Logf("[SteamController] Open begin");
-    constexpr uint32_t kProbeTimeoutMs = 80;
+std::vector<SteamController::Candidate> SteamController::EnumerateCandidates() {
+    std::vector<Candidate> candidates;
+    std::set<std::wstring> seenPaths;
+
+    // Wired before dongle: a cabled controller reports over USB and its dongle
+    // slot falls silent, so trying wired first avoids burning a probe timeout on
+    // the quiet one.
     for (uint16_t pid : { SC2026_PID, SC2026_DONGLE_PID }) {
-        auto paths = HidDevice::Enumerate(VALVE_VID, pid, VENDOR_USAGE_PAGE);
+        const bool wired = (pid == SC2026_PID);
+        const auto paths = HidDevice::Enumerate(VALVE_VID, pid, VENDOR_USAGE_PAGE);
         logging::Logf("[SteamController] Enumerate pid=%04X paths=%zu", pid, paths.size());
-        if (paths.empty()) continue;
 
-        // For the wired controller there is only one interface; for the dongle
-        // there are up to four slots (one per paired controller). Try each in
-        // order and use the first that produces a live input report.
-        for (auto const& path : paths) {
-            logging::Logf("[SteamController] Trying path pid=%04X path=%s",
-                          pid, logging::Narrow(path).c_str());
-            if (!m_device.Open(path)) continue;
-
-            uint8_t buf[64];
-            size_t n = m_device.ReadInputReport(buf, sizeof(buf), kProbeTimeoutMs);
-            InputReportKind kind = ClassifyInputReport(buf, n);
-            if (kind == InputReportKind::LegacyState || kind == InputReportKind::CompatibleState) {
-                printf("Active interface found for PID=%04X.\n", pid);
-                m_lastReportSignature = BuildReportSignature(pid, n > 0 ? buf[0] : 0, n, kind);
-                logging::Logf("[SteamController] Active interface pid=%04X reportBytes=%zu reportId=0x%02X kind=%d",
-                              pid, n, n > 0 ? buf[0] : 0, static_cast<int>(kind));
-                return true;
+        for (const auto& path : paths) {
+            // Deliberately NOT deduplicated by physical device. The dongle's
+            // pairing slots are several HID interfaces of a single USB device,
+            // so they share one container ID — collapsing on that would throw
+            // away three of four slots and break multi-controller over one
+            // dongle. What separates a real controller from an idle slot is
+            // liveness, which Open() establishes with its report probe.
+            //
+            // Paths are still deduplicated (case-insensitively) as cheap
+            // insurance against the same interface being listed twice.
+            std::wstring normalized = path;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                           [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+            if (!seenPaths.insert(normalized).second) {
+                logging::Logf("[SteamController] Skipping duplicate path pid=%04X path=%s",
+                              pid, logging::Narrow(path).c_str());
+                continue;
             }
 
-            logging::Logf("[SteamController] Path rejected pid=%04X reportBytes=%zu reportId=0x%02X kind=%d",
-                          pid, n, n > 0 ? buf[0] : 0, static_cast<int>(kind));
-            if (n > 0)
-                LogUnknownInputReportSample(buf, n, "open-probe");
-
-            m_device.Close();
+            // Identity is carried for the caller's benefit — it gives a slot a
+            // stable handle across reconnects — not used for filtering here.
+            candidates.push_back(
+                Candidate{path, DeviceIdentity::GetPhysicalDeviceKey(path), pid, wired});
         }
     }
 
-    printf("No Steam Controller found (wired PID=%04X or dongle PID=%04X).\n",
-           SC2026_PID, SC2026_DONGLE_PID);
-    logging::Logf("[SteamController] Open failed");
+    logging::Logf("[SteamController] EnumerateCandidates -> %zu interface(s)",
+                  candidates.size());
+    return candidates;
+}
+
+bool SteamController::Open(const Candidate& candidate) {
+    // Presence is not liveness: the dongle exposes a slot per pairing whether or
+    // not a controller is awake on it. Require a state-shaped report before
+    // claiming the interface, otherwise a sleeping slot becomes a virtual pad
+    // that never moves.
+    constexpr uint32_t kProbeTimeoutMs = 80;
+
+    logging::Logf("[SteamController] Trying path pid=%04X path=%s",
+                  candidate.pid, logging::Narrow(candidate.path).c_str());
+    if (!m_device.Open(candidate.path))
+        return false;
+
+    uint8_t buf[64];
+    const size_t n = m_device.ReadInputReport(buf, sizeof(buf), kProbeTimeoutMs);
+    const InputReportKind kind = ClassifyInputReport(buf, n);
+    if (kind == InputReportKind::LegacyState || kind == InputReportKind::CompatibleState) {
+        m_devicePath          = candidate.path;
+        m_lastReportSignature = BuildReportSignature(candidate.pid, n > 0 ? buf[0] : 0, n, kind);
+        logging::Logf("[SteamController] Active interface pid=%04X reportBytes=%zu reportId=0x%02X kind=%d",
+                      candidate.pid, n, n > 0 ? buf[0] : 0, static_cast<int>(kind));
+        return true;
+    }
+
+    logging::Logf("[SteamController] Path rejected pid=%04X reportBytes=%zu reportId=0x%02X kind=%d",
+                  candidate.pid, n, n > 0 ? buf[0] : 0, static_cast<int>(kind));
+    if (n > 0)
+        LogUnknownInputReportSample(buf, n, "open-probe");
+
+    m_device.Close();
+    return false;
+}
+
+bool SteamController::Open() {
+    logging::Logf("[SteamController] Open begin");
+
+    for (const auto& candidate : EnumerateCandidates()) {
+        if (Open(candidate))
+            return true;
+    }
+
+    logging::Logf("[SteamController] Open failed (wired PID=%04X, dongle PID=%04X)",
+                  SC2026_PID, SC2026_DONGLE_PID);
     return false;
 }
 
@@ -176,6 +226,7 @@ void SteamController::Close() {
     if (m_rumbleThread.joinable())
         m_rumbleThread.join();
     m_device.Close();
+    m_devicePath.clear();
 }
 
 // ---------------------------------------------------------------------------

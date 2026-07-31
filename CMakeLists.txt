@@ -26,11 +26,14 @@ endif()
 
 # Shared HID + Steam Controller library code
 add_library(SteamController STATIC
+    src/hid/DeviceIdentity.cpp
     src/hid/HidDevice.cpp
     src/steam/SteamController.cpp
 )
 target_include_directories(SteamController PUBLIC src)
-target_link_libraries(SteamController PUBLIC hid setupapi)
+# cfgmgr32: container-ID lookups in DeviceIdentity, used to tell two interfaces
+# of one physical controller apart from two controllers.
+target_link_libraries(SteamController PUBLIC hid setupapi cfgmgr32)
 if (MSVC)
     target_compile_options(SteamController PRIVATE /W4 /WX)
 endif()
