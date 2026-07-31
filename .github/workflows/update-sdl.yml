@@ -88,9 +88,7 @@ jobs:
             | sed 's#.*/##')"
           echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
 
-      - name: Enable auto-merge
-        if: steps.sdl.outputs.changed == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr merge "${{ steps.pr.outputs.number }}" --auto --squash --delete-branch
+      # Auto-merge deliberately removed. An auto-merged SDL bump already broke
+      # the trackpad once upstream (see "fix trackpad Y-axis inversion after SDL
+      # 3.4.10 update"), and this fork can sit unattended for long stretches.
+      # Dependency PRs now wait for a human.

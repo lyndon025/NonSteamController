@@ -100,9 +100,6 @@ jobs:
             | sed 's#.*/##')"
           echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
 
-      - name: Enable auto-merge
-        if: steps.deps.outputs.changed == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr merge "${{ steps.pr.outputs.number }}" --auto --squash --delete-branch
+      # Auto-merge deliberately removed — see the note in update-sdl.yml. A
+      # libVIIPER or usbip-win2 bump changes the kernel-driver contract the whole
+      # output path depends on, so it should never land unreviewed.

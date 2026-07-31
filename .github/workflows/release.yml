@@ -1,0 +1,110 @@
+name: Release
+
+# Publishes a portable build when a v* tag is pushed.
+#
+# Why a zip and not the Inno installer: installer/Build-Installer.ps1 signs the
+# Game Bar widget MSIX, and a sideloadable MSIX *must* be signed. The script
+# throws when the certificate is not in the cert store, so CI cannot produce the
+# full installer without a signing certificate supplied as a repository secret.
+# See docs at the bottom of this file for enabling that.
+#
+# The zip therefore ships the app only. It expects the usbip-win2 driver to be
+# present already, which means it is an update mechanism, not a first install.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Release
+        shell: pwsh
+        run: cmake --preset release
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build --preset release
+
+      - name: Stage portable package
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD "build\release\Release"
+          $exe = Join-Path $out "Steam Controller Remapper.exe"
+          if (-not (Test-Path $exe)) { throw "Build output not found at $exe" }
+
+          $stage = Join-Path $PWD "stage\NonSteamController"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          Copy-Item $exe $stage
+          # Copied next to the exe by the CMake POST_BUILD step; the app
+          # LoadLibrary's it from its own directory at runtime.
+          Copy-Item (Join-Path $out "libVIIPER.dll") $stage
+          Copy-Item "README.md","LICENSE" $stage
+          Copy-Item "LICENSES" $stage -Recurse
+
+          $zip = Join-Path $PWD "NonSteamController-$($env:GITHUB_REF_NAME)-portable.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
+          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Built as an array and written to a file rather than a here-string:
+          # a PowerShell here-string terminator must sit at column 0, which
+          # cannot coexist with a YAML block scalar's indentation.
+          $tag = $env:GITHUB_REF_NAME
+          $notes = @(
+            "Portable build of ``$tag``."
+            ''
+            '**This is not a first-time install.** It contains only the app and'
+            '`libVIIPER.dll` — it does not install the usbip-win2 kernel driver'
+            'or the Xbox Game Bar widget. Use it to update an existing install,'
+            'or install the usbip-win2 driver yourself first.'
+            ''
+            'No signed installer is built here. See `.github/workflows/release.yml`'
+            'for why, and for how to enable one with a signing certificate.'
+            ''
+            'Requires Windows 10+ (64-bit) and a 2026 Steam Controller.'
+          ) -join "`n"
+          $notesFile = Join-Path $PWD 'release-notes.md'
+          $notes | Out-File -FilePath $notesFile -Encoding utf8
+          gh release create "$tag" "$env:ZIP" --title "$tag" --notes-file "$notesFile"
+
+# ---------------------------------------------------------------------------
+# Enabling the full signed installer
+# ---------------------------------------------------------------------------
+# The widget MSIX must be signed by a certificate whose subject exactly matches
+# the Publisher in gamebar/SteamControllerRemapperWidget/Package.appxmanifest.
+# Generate one once and reuse it, so the widget keeps a stable package identity
+# across releases (a new certificate each build changes identity and forces
+# users to uninstall the old widget):
+#
+#   $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=lyndon025" `
+#       -KeyUsage DigitalSignature -FriendlyName NonSteamController `
+#       -CertStoreLocation "Cert:\CurrentUser\My" `
+#       -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+#   $pw = ConvertTo-SecureString -String "<a password>" -Force -AsPlainText
+#   Export-PfxCertificate -Cert $cert -FilePath cert.pfx -Password $pw
+#   [Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx")) | Set-Clipboard
+#
+# Store the base64 as secret SIGNING_PFX_BASE64 and the password as
+# SIGNING_PFX_PASSWORD, then add a step before the build that writes the pfx to
+# disk, imports it with Import-PfxCertificate, and passes its thumbprint to
+# installer/Build-Installer.ps1 -CertificateThumbprint.
+#
+# Note a self-signed certificate is not trusted by default; the installer
+# imports the exported .cer into the trust store (installer/widget-install.ps1),
+# which is what makes sideloading work.

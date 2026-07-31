@@ -35,3 +35,14 @@ jobs:
               throw "Steam Controller Remapper exited early during smoke startup."
           }
           Stop-Process -Id $process.Id -Force
+
+      # Uploaded on every build so a working binary is always obtainable without
+      # a local C++ toolchain. Retention is GitHub's default (90 days).
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: NonSteamController-${{ github.sha }}
+          path: |
+            build/release/Release/Steam Controller Remapper.exe
+            build/release/Release/libVIIPER.dll
+          if-no-files-found: error
