@@ -1,5 +1,11 @@
 # Steam Controller Remapper
 
+> **This is a personal fork.** It merges the Steam-aware automatic handoff from
+> [SteamlessController](https://github.com/ddeverill/SteamlessController) into the
+> remapping engine of [Steam-Controller-Remapper](https://github.com/CommonMugger/Steam-Controller-Remapper),
+> so keyboard/macro remapping and "just works in the tray" behaviour live in one app.
+> See [Scope and support](#scope-and-support) before relying on it.
+
 Steam Controller Remapper is a Windows tray app for using a **Steam Controller** without Steam Input taking over. It disables lizard mode, uses **SDL** for standard controller input, exposes the controller through **VIIPER/libVIIPER** virtual output, and layers game-aware paddle profiles on top.
 
 It now has two editing surfaces:
@@ -170,11 +176,40 @@ powershell.exe -ExecutionPolicy Bypass -File .\gamebar\SteamControllerRemapperWi
 
 ## License
 
-This project is now distributed under **GPL-3.0-or-later** because it links against **libVIIPER**.
+This project is distributed under **GPL-3.0-or-later** because it links against **libVIIPER**.
 
 Original SteamlessController attribution and the original MIT notice are preserved in `LICENSES/original-steamlesscontroller-mit.txt`.
 
 ## Credits
 
-- Original project: [ddeverill/SteamlessController](https://github.com/ddeverill/SteamlessController)
-- Original author: [ddeverill](https://github.com/ddeverill)
+Built on the work of two projects, and would not exist without either:
+
+- **[SteamlessController](https://github.com/ddeverill/SteamlessController)** by
+  [ddeverill](https://github.com/ddeverill) (MIT) — the original Steam Controller
+  HID and lizard-mode work, and the Steam-aware auto-handoff design this fork's
+  controller-ownership logic is ported from.
+- **[Steam-Controller-Remapper](https://github.com/CommonMugger/Steam-Controller-Remapper)**
+  by [CommonMugger](https://github.com/CommonMugger) (GPL-3.0-or-later) — the
+  remapping engine, profile system, VIIPER output backend, Game Bar widget, and
+  installer this fork is based on.
+- **[VIIPER / libVIIPER](https://github.com/Alia5/VIIPER)** by
+  [Alia5](https://github.com/Alia5) — virtual USB input devices.
+- **[usbip-win2](https://github.com/vadimgrn/usbip-win2)** by
+  [vadimgrn](https://github.com/vadimgrn) — signed USB/IP kernel-mode driver.
+- **[SDL](https://github.com/libsdl-org/SDL)** — standard controller input.
+
+## Scope and support
+
+This is a personal build, made public because someone else may find it useful —
+not a maintained product.
+
+- **No support or update commitment.** I work on this when I need something from
+  it, and it may sit untouched for long stretches.
+- **Issues are welcome and appreciated**, and I will read them, but I cannot
+  promise a fix or a timeline.
+- **If upstream ships what this adds**, I will likely switch back to it and leave
+  this dormant until I next need something from it.
+- Use at your own risk. This talks directly to controller firmware and depends on
+  a kernel-mode USB driver, which is inherently invasive.
+
+Forks are encouraged — if you want to take this further, please do.
