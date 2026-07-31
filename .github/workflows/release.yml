@@ -81,7 +81,17 @@ jobs:
           ) -join "`n"
           $notesFile = Join-Path $PWD 'release-notes.md'
           $notes | Out-File -FilePath $notesFile -Encoding utf8
-          gh release create "$tag" "$env:ZIP" --title "$tag" --notes-file "$notesFile"
+
+          # Any semver prerelease tag (v0.1.0-alpha, v1.8.0-rc1) is published as a
+          # prerelease; a plain vX.Y.Z becomes a full release. GitHub's
+          # /releases/latest endpoint excludes prereleases, so the in-app updater
+          # will not offer one to users.
+          $gh = @('release','create',"$tag","$env:ZIP",'--title',"$tag",'--notes-file',"$notesFile")
+          if ($tag -match '-') {
+              $gh += '--prerelease'
+              Write-Host "Publishing $tag as a prerelease."
+          }
+          & gh @gh
 
 # ---------------------------------------------------------------------------
 # Enabling the full signed installer
