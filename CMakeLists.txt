@@ -24,6 +24,21 @@ if (SCR_FETCH_SDL)
     FetchContent_MakeAvailable(SDL3)
 endif()
 
+# WebView2, for the Steam-styled remap editor. The .nupkg is a zip, so
+# FetchContent extracts it directly. WebView2LoaderStatic.lib is used rather than
+# the DLL so there is nothing extra to ship alongside the exe.
+FetchContent_Declare(WebView2
+    URL      https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.2849.39
+    DOWNLOAD_EXTRACT_TIMESTAMP ON
+)
+FetchContent_MakeAvailable(WebView2)
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(WV2_ARCH "x64")
+else()
+    set(WV2_ARCH "x86")
+endif()
+
 # Shared HID + Steam Controller library code
 add_library(SteamController STATIC
     src/hid/DeviceIdentity.cpp
@@ -71,13 +86,23 @@ add_executable(SteamControllerRemapper WIN32
     src/app/PaddleOverlay.cpp
     src/app/PaddleConfig.cpp
     src/app/PaddleConfigWindow.cpp
+    src/app/RemapWebWindow.cpp
     src/app/SteamLibrary.cpp
     src/app/MacroRecorder.cpp
     src/app/TrackpadMouse.cpp
     resources/app.rc
 )
-target_include_directories(SteamControllerRemapper PRIVATE resources third_party)
+target_include_directories(SteamControllerRemapper PRIVATE
+    resources
+    third_party
+    ${webview2_SOURCE_DIR}/build/native/include
+)
 target_link_libraries(SteamControllerRemapper PRIVATE SteamController gdiplus ole32 comctl32)
+target_link_libraries(SteamControllerRemapper PRIVATE
+    ${webview2_SOURCE_DIR}/build/native/${WV2_ARCH}/WebView2LoaderStatic.lib
+    version
+    shlwapi
+)
 target_link_libraries(SteamControllerRemapper PRIVATE winhttp)
 target_link_libraries(SteamControllerRemapper PRIVATE urlmon)
 if (TARGET SDL3::SDL3)
@@ -88,7 +113,9 @@ set_target_properties(SteamControllerRemapper PROPERTIES
     OUTPUT_NAME "Steam Controller Remapper"
 )
 if (MSVC)
-    target_compile_options(SteamControllerRemapper PRIVATE /W4 /WX)
+    # /utf-8 so the non-ASCII characters in source comments are read as UTF-8
+    # regardless of the build machine's code page (C4819 is fatal under /WX).
+    target_compile_options(SteamControllerRemapper PRIVATE /W4 /WX /utf-8)
 endif()
 
 add_custom_command(TARGET SteamControllerRemapper POST_BUILD

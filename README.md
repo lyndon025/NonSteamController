@@ -17,7 +17,8 @@ It now has two editing surfaces:
 
 ### Desktop remapper
 
-![Desktop remapper](docs/images/remapper.png)
+<!-- Screenshot removed: the inherited image showed the old Win32 editor,
+     which the WebView2 editor replaces. See docs/images/README.md. -->
 
 The desktop editor is the full configuration surface. Use it to:
 
@@ -30,7 +31,7 @@ The desktop editor is the full configuration surface. Use it to:
 
 ### Xbox Game Bar widget
 
-![Game Bar widget](docs/images/gamebar-widget.png)
+<!-- Screenshot removed pending a fresh capture. See docs/images/README.md. -->
 
 The widget is the quick-access surface for Xbox Mode and in-game use. Use it to:
 
@@ -45,7 +46,8 @@ Current widget limitation:
 
 ### Tray icon and quick controls
 
-![Tray icon menu](docs/images/tray-icon.png)
+<!-- Screenshot removed: the inherited image predates the Automatic control
+     submenu. See docs/images/README.md. -->
 
 The tray icon is the quickest way to manage the remapper without opening the full editor. From the menu you can:
 

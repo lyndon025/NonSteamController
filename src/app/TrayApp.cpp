@@ -774,7 +774,7 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // Only a running game is a reason to refuse; Steam merely sitting
             // idle no longer is, since OffOnlyInGame keeps working through it.
             if (m_steamState != SteamState::InGame)
-                ShowPaddleConfigWindow();
+                ShowRemapEditor();
             break;
         case IDM_CHECK_UPDATES:
             CheckForUpdates(true);
@@ -1332,6 +1332,47 @@ void TrayApp::LoadPaddleConfig() {
     PaddleActionBindings legacyActions = PaddleConfig::Load();
     PaddleMappings legacyMappings = m_controller->GetPaddleMappings();
     m_remapBackend.Load(legacyMappings, legacyActions);
+}
+
+void TrayApp::ShowRemapEditor() {
+    // Prefer the Steam-styled WebView2 editor. The Win32 window remains the
+    // fallback when the runtime is absent, and still hosts the surfaces the web
+    // editor does not cover yet (macro recording, game sources), reachable from
+    // its "Macros & profiles" button.
+    if (!RemapWebWindow::IsRuntimeAvailable()) {
+        logging::Logf("[Remap] WebView2 unavailable; using the Win32 editor");
+        ShowPaddleConfigWindow();
+        return;
+    }
+
+    if (!m_remapWebWindow)
+        m_remapWebWindow = std::make_unique<RemapWebWindow>();
+
+    const bool opened = m_remapWebWindow->Open(
+        m_hInstance,
+        m_remapBackend.GetActiveProfileId(),
+        [this]() { return m_controller->GetPaddleActions(); },
+        [this](int index, const std::wstring& actionString) {
+            PaddleAction action{};
+            if (!PaddleConfig::ParseActionString(actionString, action)) {
+                logging::Logf("[Remap] rejected action string for button %d", index);
+                return;
+            }
+            PaddleActionBindings bindings = m_controller->GetPaddleActions();
+            if (PaddleAction* slot = GetButtonAction(bindings, index)) {
+                *slot = std::move(action);
+                m_controller->SetPaddleActions(bindings);
+                m_remapBackend.SaveActiveProfile(m_controller->GetPaddleMappings(), bindings);
+                SaveSettings();
+                PublishWidgetState();
+            }
+        },
+        [this]() { ShowPaddleConfigWindow(); });
+
+    if (!opened) {
+        logging::Logf("[Remap] web editor failed to open; using the Win32 editor");
+        ShowPaddleConfigWindow();
+    }
 }
 
 void TrayApp::ShowPaddleConfigWindow() {

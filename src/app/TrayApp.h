@@ -2,6 +2,7 @@
 #include "PaddleConfig.h"
 #include "RemapBackend.h"
 #include "RemapIpcServer.h"
+#include "RemapWebWindow.h"
 #include "SteamWatcher.h"
 #include <Windows.h>
 #include <memory>
@@ -43,6 +44,7 @@ private:
     void LoadSettings();
     void SaveSettings();
     void LoadPaddleConfig();
+    void ShowRemapEditor();
     void ShowPaddleConfigWindow();
     bool GetAutoSwitchProfiles() const;
     void SetAutoSwitchProfiles(bool enabled);
@@ -70,6 +72,7 @@ private:
     HICON                              m_iconOn    = nullptr;
     std::unique_ptr<ControllerManager> m_controller;
     std::unique_ptr<PaddleConfigWindow> m_paddleConfigWindow;
+    std::unique_ptr<RemapWebWindow>     m_remapWebWindow;
     std::unique_ptr<RemapIpcServer>    m_ipcServer;
     SteamWatcher                       m_steamWatcher;
     AutoMode                           m_autoMode = AutoMode::OffWhileSteam;
