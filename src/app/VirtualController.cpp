@@ -1,126 +1,20 @@
 #include "VirtualController.h"
+#include "ViiperBus.h"
 #include "logging/Log.h"
 #include "steam/SteamController.h"
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable: 4505)
-#endif
-#include "libVIIPER/libVIIPER.h"
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
 #include <Windows.h>
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <unordered_map>
 
 namespace {
 
-struct ViiperApi {
-    HMODULE module = nullptr;
-    decltype(&NewUSBServer) NewUSBServerFn = nullptr;
-    decltype(&CloseUSBServer) CloseUSBServerFn = nullptr;
-    decltype(&CreateUSBBus) CreateUSBBusFn = nullptr;
-    decltype(&RemoveUSBBus) RemoveUSBBusFn = nullptr;
-    decltype(&CreateXbox360Device) CreateXbox360DeviceFn = nullptr;
-    decltype(&SetXbox360DeviceState) SetXbox360DeviceStateFn = nullptr;
-    decltype(&SetXbox360RumbleCallback) SetXbox360RumbleCallbackFn = nullptr;
-    decltype(&RemoveXbox360Device) RemoveXbox360DeviceFn = nullptr;
-    decltype(&CreateDS4Device) CreateDS4DeviceFn = nullptr;
-    decltype(&SetDS4DeviceState) SetDS4DeviceStateFn = nullptr;
-    decltype(&SetDS4OutputCallback) SetDS4OutputCallbackFn = nullptr;
-    decltype(&RemoveDS4Device) RemoveDS4DeviceFn = nullptr;
-    decltype(&CreateMouseDevice) CreateMouseDeviceFn = nullptr;
-    decltype(&SetMouseDeviceState) SetMouseDeviceStateFn = nullptr;
-    decltype(&RemoveMouseDevice) RemoveMouseDeviceFn = nullptr;
-    decltype(&CreateKeyboardDevice) CreateKeyboardDeviceFn = nullptr;
-    decltype(&SetKeyboardDeviceState) SetKeyboardDeviceStateFn = nullptr;
-    decltype(&RemoveKeyboardDevice) RemoveKeyboardDeviceFn = nullptr;
-    bool loaded = false;
-    bool mouseLoaded = false;
-    bool keyboardLoaded = false;
-};
-
 std::mutex g_notificationMutex;
 std::unordered_map<std::uintptr_t, VirtualController*> g_targetOwners;
-
-
-template <typename T>
-bool LoadProc(HMODULE module, const char* name, T& fn) {
-    fn = reinterpret_cast<T>(GetProcAddress(module, name));
-    if (!fn)
-        logging::Logf("[VIIPER] Missing export: %s", name);
-    return fn != nullptr;
-}
-
-std::wstring GetAppDirectory() {
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring full(path);
-    const size_t slash = full.find_last_of(L"\\/");
-    if (slash == std::wstring::npos)
-        return L".";
-    return full.substr(0, slash);
-}
-
-ViiperApi& GetViiperApi() {
-    static ViiperApi api;
-    static std::once_flag once;
-    std::call_once(once, [&]() {
-        const std::wstring dllPath = GetAppDirectory() + L"\\libVIIPER.dll";
-        api.module = LoadLibraryW(dllPath.c_str());
-        if (!api.module) {
-            logging::Logf("[VIIPER] LoadLibrary failed path=%s error=%lu",
-                          logging::Narrow(dllPath).c_str(),
-                          GetLastError());
-            return;
-        }
-
-        api.loaded =
-            LoadProc(api.module, "NewUSBServer", api.NewUSBServerFn) &&
-            LoadProc(api.module, "CloseUSBServer", api.CloseUSBServerFn) &&
-            LoadProc(api.module, "CreateUSBBus", api.CreateUSBBusFn) &&
-            LoadProc(api.module, "RemoveUSBBus", api.RemoveUSBBusFn) &&
-            LoadProc(api.module, "CreateXbox360Device", api.CreateXbox360DeviceFn) &&
-            LoadProc(api.module, "SetXbox360DeviceState", api.SetXbox360DeviceStateFn) &&
-            LoadProc(api.module, "SetXbox360RumbleCallback", api.SetXbox360RumbleCallbackFn) &&
-            LoadProc(api.module, "RemoveXbox360Device", api.RemoveXbox360DeviceFn) &&
-            LoadProc(api.module, "CreateDS4Device", api.CreateDS4DeviceFn) &&
-            LoadProc(api.module, "SetDS4DeviceState", api.SetDS4DeviceStateFn) &&
-            LoadProc(api.module, "SetDS4OutputCallback", api.SetDS4OutputCallbackFn) &&
-            LoadProc(api.module, "RemoveDS4Device", api.RemoveDS4DeviceFn);
-
-        if (api.loaded) {
-            api.mouseLoaded =
-                LoadProc(api.module, "CreateMouseDevice",   api.CreateMouseDeviceFn) &&
-                LoadProc(api.module, "SetMouseDeviceState", api.SetMouseDeviceStateFn) &&
-                LoadProc(api.module, "RemoveMouseDevice",   api.RemoveMouseDeviceFn);
-            api.keyboardLoaded =
-                LoadProc(api.module, "CreateKeyboardDevice",   api.CreateKeyboardDeviceFn) &&
-                LoadProc(api.module, "SetKeyboardDeviceState", api.SetKeyboardDeviceStateFn) &&
-                LoadProc(api.module, "RemoveKeyboardDevice",   api.RemoveKeyboardDeviceFn);
-            logging::Logf("[VIIPER] libVIIPER loaded from %s mouseSupport=%d keyboardSupport=%d",
-                          logging::Narrow(dllPath).c_str(), api.mouseLoaded ? 1 : 0, api.keyboardLoaded ? 1 : 0);
-        }
-    });
-    return api;
-}
-
-void ViiperLogCallback(VIIPERLogLevel level, const char* message) {
-    const char* levelName = "INFO";
-    switch (level) {
-    case VIIPER_LOG_DEBUG: levelName = "DEBUG"; break;
-    case VIIPER_LOG_INFO: levelName = "INFO"; break;
-    case VIIPER_LOG_WARN: levelName = "WARN"; break;
-    case VIIPER_LOG_ERROR: levelName = "ERROR"; break;
-    }
-    logging::Logf("[VIIPER/%s] %s", levelName, message ? message : "");
-}
 
 static XusbReport Translate(const uint8_t* buf, size_t n) {
     constexpr int16_t kStickCenterDeadzone = 1024;
@@ -424,56 +318,25 @@ VirtualController::VirtualController(EmulationMode mode, PaddleMappings paddleMa
                                      RumbleCallback onRumble)
     : m_mode(mode), m_paddleMappings(paddleMappings), m_paddleActions(std::move(paddleActions)),
       m_onRumble(std::move(onRumble)) {
+    ViiperBus& bus = ViiperBus::Instance();
+    if (!bus.Acquire()) {
+        logging::Logf("[VIIPER] Bus unavailable; cannot create virtual pad");
+        m_driverMissing = true;
+        return;
+    }
+    m_busAcquired = true;
+
     ViiperApi& api = GetViiperApi();
-    if (!api.loaded) {
-        logging::Logf("[VIIPER] API not available");
-        m_driverMissing = true;
-        return;
-    }
-
-    USBServerConfig config{};
-    config.addr = const_cast<char*>("localhost:3245");
-    config.connection_timeout_ms = 30000;
-    config.device_handler_connect_timeout_ms = 5000;
-    config.write_batch_flush_interval_ms = 1;
-
-    // When switching emulation modes, the previous VirtualController's server
-    // is torn down asynchronously (its bus cleanup runs on background
-    // goroutines). Creating a new server/bus immediately can fail because the
-    // listen socket or USB bus has not been released yet. Retry with a short
-    // backoff so a mode switch doesn't surface a spurious failure popup.
-    constexpr int kMaxAttempts = 10;
-    bool serverReady = false;
-    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-        if (!api.NewUSBServerFn(&config, &m_serverHandle, &ViiperLogCallback)) {
-            m_serverHandle = 0;
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            continue;
-        }
-        if (!api.CreateUSBBusFn(m_serverHandle, &m_busId)) {
-            api.CloseUSBServerFn(m_serverHandle);
-            m_serverHandle = 0;
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            continue;
-        }
-        serverReady = true;
-        break;
-    }
-
-    if (!serverReady) {
-        logging::Logf("[VIIPER] Server/bus creation failed after %d attempts; USBIP client/driver may be unavailable",
-                      kMaxAttempts);
-        m_driverMissing = true;
-        return;
-    }
+    const std::uintptr_t server = bus.ServerHandle();
+    const std::uint32_t  busId  = bus.BusId();
 
     bool ok = false;
     if (m_mode == EmulationMode::DualShock4) {
-        ok = api.CreateDS4DeviceFn(m_serverHandle, &m_deviceHandle, m_busId, true, 0, 0, nullptr) != 0;
+        ok = api.CreateDS4DeviceFn(server, &m_deviceHandle, busId, true, 0, 0, nullptr) != 0;
         if (ok)
             ok = api.SetDS4OutputCallbackFn(m_deviceHandle, &VirtualController::ViiperDs4OutputCallback) != 0;
     } else {
-        ok = api.CreateXbox360DeviceFn(m_serverHandle, &m_deviceHandle, m_busId, true, 0, 0, 0) != 0;
+        ok = api.CreateXbox360DeviceFn(server, &m_deviceHandle, busId, true, 0, 0, 0) != 0;
         if (ok)
             ok = api.SetXbox360RumbleCallbackFn(m_deviceHandle, &VirtualController::ViiperXboxRumbleCallback) != 0;
     }
@@ -481,14 +344,14 @@ VirtualController::VirtualController(EmulationMode mode, PaddleMappings paddleMa
     if (!ok) {
         logging::Logf("[VIIPER] Device creation/register callback failed mode=%d", static_cast<int>(m_mode));
         m_driverMissing = true;
-        if (m_mode == EmulationMode::DualShock4 && m_deviceHandle)
-            api.RemoveDS4DeviceFn(m_deviceHandle);
-        if (m_mode == EmulationMode::Xbox360 && m_deviceHandle)
-            api.RemoveXbox360DeviceFn(m_deviceHandle);
-        if (m_serverHandle)
-            api.CloseUSBServerFn(m_serverHandle);
-        m_deviceHandle = 0;
-        m_serverHandle = 0;
+        if (m_deviceHandle) {
+            if (m_mode == EmulationMode::DualShock4) api.RemoveDS4DeviceFn(m_deviceHandle);
+            else                                     api.RemoveXbox360DeviceFn(m_deviceHandle);
+            m_deviceHandle = 0;
+        }
+        // The server stays up — it is shared and other pads may still need it.
+        bus.Release();
+        m_busAcquired = false;
         return;
     }
 
@@ -497,29 +360,9 @@ VirtualController::VirtualController(EmulationMode mode, PaddleMappings paddleMa
         g_targetOwners[m_deviceHandle] = this;
     }
 
-    if (api.mouseLoaded) {
-        if (api.CreateMouseDeviceFn(m_serverHandle, &m_mouseHandle, m_busId, true, 0, 0) != 0)
-            logging::Logf("[VIIPER] Virtual mouse connected handle=%llu",
-                          static_cast<unsigned long long>(m_mouseHandle));
-        else {
-            logging::Logf("[VIIPER] Virtual mouse creation failed");
-            m_mouseHandle = 0;
-        }
-    }
-
-    if (api.keyboardLoaded) {
-        if (api.CreateKeyboardDeviceFn(m_serverHandle, &m_keyboardHandle, m_busId, true, 0, 0) != 0)
-            logging::Logf("[VIIPER] Virtual keyboard connected handle=%llu",
-                          static_cast<unsigned long long>(m_keyboardHandle));
-        else {
-            logging::Logf("[VIIPER] Virtual keyboard creation failed");
-            m_keyboardHandle = 0;
-        }
-    }
-
     logging::Logf("[VIIPER] Virtual %s controller connected bus=%u handle=%llu",
                   m_mode == EmulationMode::DualShock4 ? "DualShock 4" : "Xbox 360",
-                  m_busId,
+                  busId,
                   static_cast<unsigned long long>(m_deviceHandle));
     m_valid = true;
 }
@@ -528,16 +371,12 @@ VirtualController::~VirtualController() {
     logging::Logf("[VIIPER] VirtualController dtor valid=%d", m_valid ? 1 : 0);
     ViiperApi& api = GetViiperApi();
 
+    // Erased under the same lock the callbacks take, so a rumble callback that
+    // is already mid-lookup finishes before this object's storage goes away.
     if (m_deviceHandle) {
         std::lock_guard<std::mutex> lock(g_notificationMutex);
         g_targetOwners.erase(m_deviceHandle);
     }
-
-    if (api.loaded && api.keyboardLoaded && m_keyboardHandle)
-        api.RemoveKeyboardDeviceFn(m_keyboardHandle);
-
-    if (api.loaded && api.mouseLoaded && m_mouseHandle)
-        api.RemoveMouseDeviceFn(m_mouseHandle);
 
     if (api.loaded && m_deviceHandle) {
         if (m_mode == EmulationMode::DualShock4) {
@@ -547,14 +386,16 @@ VirtualController::~VirtualController() {
             api.SetXbox360RumbleCallbackFn(m_deviceHandle, nullptr);
             api.RemoveXbox360DeviceFn(m_deviceHandle);
         }
-        // Give the USB bus a moment to process the device removal before
-        // tearing down the server. Without this, CloseUSBServerFn can race
-        // the async USB cleanup and trigger an error dialog from VIIPER.
-        Sleep(150);
+        m_deviceHandle = 0;
     }
 
-    if (api.loaded && m_serverHandle)
-        api.CloseUSBServerFn(m_serverHandle);
+    // Only drops the shared keyboard/mouse once the last pad is gone; the
+    // server itself is closed by ViiperBus::Shutdown() at process exit. This is
+    // what makes an emulation-mode switch cheap instead of a full server cycle.
+    if (m_busAcquired) {
+        ViiperBus::Instance().Release();
+        m_busAcquired = false;
+    }
 }
 
 void VirtualController::Update(const uint8_t* buf, size_t n, const StandardGamepadState* standardState) {
@@ -609,114 +450,19 @@ void VirtualController::ViiperXboxRumbleCallback(std::uintptr_t handle, uint8_t 
     it->second->m_onRumble(leftMotor, rightMotor);
 }
 
-// Returns the HID modifier bit for modifier VK codes, or 0 if not a modifier.
-static uint8_t VkToModifierBit(uint16_t vk) {
-    switch (vk) {
-    case VK_LCONTROL: case VK_CONTROL: return KB_MOD_LEFT_CTRL;
-    case VK_RCONTROL:                  return KB_MOD_RIGHT_CTRL;
-    case VK_LSHIFT:   case VK_SHIFT:   return KB_MOD_LEFT_SHIFT;
-    case VK_RSHIFT:                    return KB_MOD_RIGHT_SHIFT;
-    case VK_LMENU:    case VK_MENU:    return KB_MOD_LEFT_ALT;
-    case VK_RMENU:                     return KB_MOD_RIGHT_ALT;
-    case VK_LWIN:                      return KB_MOD_LEFT_GUI;
-    case VK_RWIN:                      return KB_MOD_RIGHT_GUI;
-    default:                           return 0;
-    }
-}
-
-// Returns the HID usage code for a non-modifier VK, or 0 if unknown.
-static uint8_t VkToHidUsage(uint16_t vk) {
-    // Letters A-Z
-    if (vk >= 'A' && vk <= 'Z') return static_cast<uint8_t>(0x04 + (vk - 'A'));
-    // Digits 1-9, then 0
-    if (vk >= '1' && vk <= '9') return static_cast<uint8_t>(0x1E + (vk - '1'));
-    if (vk == '0') return 0x27;
-    // Function keys F1-F12
-    if (vk >= VK_F1  && vk <= VK_F12) return static_cast<uint8_t>(0x3A + (vk - VK_F1));
-    if (vk >= VK_F13 && vk <= VK_F24) return static_cast<uint8_t>(0x68 + (vk - VK_F13));
-    switch (vk) {
-    case VK_RETURN:    return 0x28;
-    case VK_ESCAPE:    return 0x29;
-    case VK_BACK:      return 0x2A;
-    case VK_TAB:       return 0x2B;
-    case VK_SPACE:     return 0x2C;
-    case VK_OEM_MINUS: return 0x2D;
-    case VK_OEM_PLUS:  return 0x2E;
-    case VK_OEM_4:     return 0x2F;  // [
-    case VK_OEM_6:     return 0x30;  // ]
-    case VK_OEM_5:     return 0x31;  // backslash
-    case VK_OEM_1:     return 0x33;  // ;
-    case VK_OEM_7:     return 0x34;  // '
-    case VK_OEM_3:     return 0x35;  // `
-    case VK_OEM_COMMA: return 0x36;
-    case VK_OEM_PERIOD:return 0x37;
-    case VK_OEM_2:     return 0x38;  // /
-    case VK_CAPITAL:   return 0x39;
-    case VK_SNAPSHOT:  return 0x46;
-    case VK_SCROLL:    return 0x47;
-    case VK_PAUSE:     return 0x48;
-    case VK_INSERT:    return 0x49;
-    case VK_HOME:      return 0x4A;
-    case VK_PRIOR:     return 0x4B;  // Page Up
-    case VK_DELETE:    return 0x4C;
-    case VK_END:       return 0x4D;
-    case VK_NEXT:      return 0x4E;  // Page Down
-    case VK_RIGHT:     return 0x4F;
-    case VK_LEFT:      return 0x50;
-    case VK_DOWN:      return 0x51;
-    case VK_UP:        return 0x52;
-    case VK_NUMLOCK:   return 0x53;
-    case VK_DIVIDE:    return 0x54;
-    case VK_MULTIPLY:  return 0x55;
-    case VK_SUBTRACT:  return 0x56;
-    case VK_ADD:       return 0x57;
-    case VK_NUMPAD1:   return 0x59;
-    case VK_NUMPAD2:   return 0x5A;
-    case VK_NUMPAD3:   return 0x5B;
-    case VK_NUMPAD4:   return 0x5C;
-    case VK_NUMPAD5:   return 0x5D;
-    case VK_NUMPAD6:   return 0x5E;
-    case VK_NUMPAD7:   return 0x5F;
-    case VK_NUMPAD8:   return 0x60;
-    case VK_NUMPAD9:   return 0x61;
-    case VK_NUMPAD0:   return 0x62;
-    case VK_DECIMAL:   return 0x63;
-    default:           return 0;
-    }
-}
-
-void VirtualController::ApplyKeyVk(uint16_t vk, bool down) {
-    const uint8_t mod = VkToModifierBit(vk);
-    if (mod) {
-        if (down) m_kbModifiers |= mod; else m_kbModifiers &= ~mod;
-        return;
-    }
-    const uint8_t hid = VkToHidUsage(vk);
-    if (!hid) return;
-    if (down) m_kbBitmap[hid / 8] |=  static_cast<uint8_t>(1u << (hid % 8));
-    else      m_kbBitmap[hid / 8] &= ~static_cast<uint8_t>(1u << (hid % 8));
-}
-
+// Keyboard and mouse output live on the shared bus, so these are thin
+// forwards. They stay on VirtualController because PaddleOverlay and
+// TrackpadMouse are already wired to the pad that owns the binding.
 void VirtualController::KeyChordDown(const std::vector<uint16_t>& vkChord) {
-    ViiperApi& api = GetViiperApi();
-    if (!m_keyboardHandle || !api.keyboardLoaded) return;
-    std::lock_guard<std::mutex> lock(m_keyboardMutex);
-    for (uint16_t vk : vkChord) ApplyKeyVk(vk, true);
-    KeyboardDeviceState state{};
-    state.Modifiers = m_kbModifiers;
-    memcpy(state.KeyBitmap, m_kbBitmap.data(), sizeof(state.KeyBitmap));
-    api.SetKeyboardDeviceStateFn(m_keyboardHandle, state);
+    ViiperBus::Instance().KeyChordDown(vkChord);
 }
 
 void VirtualController::KeyChordUp(const std::vector<uint16_t>& vkChord) {
-    ViiperApi& api = GetViiperApi();
-    if (!m_keyboardHandle || !api.keyboardLoaded) return;
-    std::lock_guard<std::mutex> lock(m_keyboardMutex);
-    for (uint16_t vk : vkChord) ApplyKeyVk(vk, false);
-    KeyboardDeviceState state{};
-    state.Modifiers = m_kbModifiers;
-    memcpy(state.KeyBitmap, m_kbBitmap.data(), sizeof(state.KeyBitmap));
-    api.SetKeyboardDeviceStateFn(m_keyboardHandle, state);
+    ViiperBus::Instance().KeyChordUp(vkChord);
+}
+
+void VirtualController::UpdateMouse(int16_t dx, int16_t dy, uint8_t buttons) {
+    ViiperBus::Instance().UpdateMouse(dx, dy, buttons);
 }
 
 void VirtualController::GamepadMacroDown(const std::vector<PaddleMapping>& mappings) {
@@ -743,44 +489,6 @@ void VirtualController::GamepadMacroUp(const std::vector<PaddleMapping>& mapping
         report.buttons |= m_macroGamepadButtons;
     }
     SendXusbReport(report);
-}
-
-void VirtualController::UpdateMouse(int16_t dx, int16_t dy, uint8_t buttons) {
-    ViiperApi& api = GetViiperApi();
-    if (m_mouseHandle && api.mouseLoaded) {
-        MouseDeviceState state{};
-        state.Buttons = buttons;
-        state.DX = dx;
-        state.DY = dy;
-        api.SetMouseDeviceStateFn(m_mouseHandle, state);
-        m_lastMouseButtons = buttons;
-        return;
-    }
-    // SendInput fallback when VIIPER mouse is not available
-    if (dx != 0 || dy != 0) {
-        INPUT input{};
-        input.type = INPUT_MOUSE;
-        input.mi.dwFlags = MOUSEEVENTF_MOVE;
-        input.mi.dx = dx;
-        input.mi.dy = dy;
-        SendInput(1, &input, sizeof(INPUT));
-    }
-    if (buttons != m_lastMouseButtons) {
-        const uint8_t changed = buttons ^ m_lastMouseButtons;
-        if (changed & 0x01u) {
-            INPUT input{};
-            input.type = INPUT_MOUSE;
-            input.mi.dwFlags = (buttons & 0x01u) ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
-            SendInput(1, &input, sizeof(INPUT));
-        }
-        if (changed & 0x02u) {
-            INPUT input{};
-            input.type = INPUT_MOUSE;
-            input.mi.dwFlags = (buttons & 0x02u) ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
-            SendInput(1, &input, sizeof(INPUT));
-        }
-        m_lastMouseButtons = buttons;
-    }
 }
 
 void VirtualController::ViiperDs4OutputCallback(std::uintptr_t handle, uint8_t rumbleSmall, uint8_t rumbleLarge,

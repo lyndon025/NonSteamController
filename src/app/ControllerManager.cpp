@@ -1,4 +1,5 @@
 #include "ControllerManager.h"
+#include "ViiperBus.h"
 #include "VirtualController.h"
 #include "logging/Log.h"
 #include "steam/SteamController.h"
@@ -281,6 +282,10 @@ void ControllerManager::TryOpen() {
 
 void ControllerManager::Close(bool restoreLizard) {
     StopReadLoop();
+    // Lift any keys a remap was holding while the virtual keyboard still
+    // exists, so yielding the controller mid-chord cannot leave a key latched
+    // down in whatever app has focus.
+    ViiperBus::Instance().ReleaseAllKeys();
     m_virtual.reset();
     m_paddleOverlay.Reset();
     m_trackpad.SetHapticCallback({});

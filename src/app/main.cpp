@@ -1,4 +1,5 @@
 #include "TrayApp.h"
+#include "ViiperBus.h"
 #include <Windows.h>
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
@@ -9,10 +10,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         return 0;
     }
 
-    TrayApp app;
     int result = 0;
-    if (app.Init(hInstance))
-        result = app.Run();
+    {
+        TrayApp app;
+        if (app.Init(hInstance))
+            result = app.Run();
+    }
+    // Scoped so every VirtualController has been destroyed — and so has dropped
+    // its bus reference — before the shared libVIIPER server is closed.
+    ViiperBus::Instance().Shutdown();
 
     CloseHandle(mutex);
     return result;

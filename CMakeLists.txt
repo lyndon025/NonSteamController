@@ -62,6 +62,7 @@ add_executable(SteamControllerRemapper WIN32
     src/app/RemapIpcServer.cpp
     src/app/ControllerManager.cpp
     src/app/SdlGamepadInput.cpp
+    src/app/ViiperBus.cpp
     src/app/VirtualController.cpp
     src/app/PaddleOverlay.cpp
     src/app/PaddleConfig.cpp

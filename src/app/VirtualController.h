@@ -175,13 +175,12 @@ private:
                                         uint8_t ledRed, uint8_t ledGreen, uint8_t ledBlue,
                                         uint8_t flashOn, uint8_t flashOff);
 
-    void* m_module        = nullptr;
-    std::uintptr_t m_serverHandle = 0;
+    // Only the pad device is owned per instance. The USB server, the bus, and
+    // the shared virtual keyboard/mouse live in ViiperBus so that several
+    // controllers can be emulated at once without colliding on libVIIPER's
+    // fixed listen address or spawning one virtual keyboard per controller.
     std::uintptr_t m_deviceHandle = 0;
-    std::uintptr_t m_mouseHandle    = 0;
-    std::uintptr_t m_keyboardHandle = 0;
-    uint8_t        m_lastMouseButtons = 0;
-    uint32_t m_busId = 0;
+    bool  m_busAcquired  = false;
     bool  m_valid        = false;
     bool  m_driverMissing = false;
     EmulationMode m_mode = EmulationMode::Xbox360;
@@ -190,10 +189,6 @@ private:
     bool m_prevPaddlePressed[kTotalButtonCount] = {};
     bool m_loggedSdlState = false;
     RumbleCallback m_onRumble;
-    std::mutex                 m_keyboardMutex;
-    uint8_t                    m_kbModifiers = 0;
-    std::array<uint8_t, 32>    m_kbBitmap{};
-    void ApplyKeyVk(uint16_t vk, bool down);
     mutable std::mutex         m_macroMutex;
     uint16_t                   m_macroGamepadButtons = 0;
     XusbReport                 m_lastBaseXusbReport{};
