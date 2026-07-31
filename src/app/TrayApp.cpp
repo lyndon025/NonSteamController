@@ -26,7 +26,14 @@ static constexpr wchar_t WNDCLASS_NAME[] = L"SteamControllerRemapperTray";
 static constexpr wchar_t REG_KEY[]       = L"Software\\SteamControllerRemapper";
 static constexpr wchar_t LEGACY_REG_KEY[] = L"Software\\XboxModeSteamlessController";
 static constexpr wchar_t REG_RUN_KEY[]   = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-static constexpr wchar_t APP_NAME[]      = L"Steam Controller Remapper";
+// Display name: window title, tray tooltip, dialog captions, and the Run-key
+// value name. Deliberately renamed without touching the executable filename,
+// the installer, the settings key or the log directory — the widget sideload
+// scripts hard-code the exe name in several places that cannot be tested here,
+// and keeping REG_KEY stable means existing settings carry over.
+static constexpr wchar_t APP_NAME[]      = L"NonSteamController";
+// Prior Run-key value names, cleaned up / migrated from on startup.
+static constexpr wchar_t PREV_APP_NAME[]   = L"Steam Controller Remapper";
 static constexpr wchar_t LEGACY_APP_NAME[] = L"Xbox Mode Steamless Controller";
 static constexpr wchar_t OLD_APP_NAME[]  = L"SteamlessController";
 static constexpr wchar_t REG_LAST_PROFILE[] = L"LastActiveProfileId";
@@ -53,7 +60,8 @@ static bool HasRunEntry(const wchar_t* name) {
 }
 
 static bool HasAnyRunEntry() {
-    return HasRunEntry(APP_NAME) || HasRunEntry(LEGACY_APP_NAME) || HasRunEntry(OLD_APP_NAME);
+    return HasRunEntry(APP_NAME) || HasRunEntry(PREV_APP_NAME) ||
+           HasRunEntry(LEGACY_APP_NAME) || HasRunEntry(OLD_APP_NAME);
 }
 
 static bool OpenSettingsKeyForRead(HKEY& key) {
@@ -667,7 +675,10 @@ bool TrayApp::Init(HINSTANCE hInstance) {
     LoadPaddleConfig();
     CheckControllerReportSignature();
     ApplyProfileById(m_remapBackend.GetActiveProfileId(), true);
-    if ((HasRunEntry(LEGACY_APP_NAME) || HasRunEntry(OLD_APP_NAME)) && !HasRunEntry(APP_NAME))
+    // Migrate autostart from any previous value name so a rename never silently
+    // stops the app launching at login.
+    if ((HasRunEntry(PREV_APP_NAME) || HasRunEntry(LEGACY_APP_NAME) ||
+         HasRunEntry(OLD_APP_NAME)) && !HasRunEntry(APP_NAME))
         SetStartupEnabled(true);
     AddTrayIcon();
     UpdateTrayIcon(m_controller->IsConnected(), m_controller->IsGameModeActive(), false);
@@ -914,9 +925,9 @@ void TrayApp::UpdateTrayIcon(bool connected, bool gameModeActive, bool outputBac
     if (outputBackendMissing) { ShowOutputBackendBalloon(); return; }
     bool gameModeOn = gameModeActive;
 
-    const wchar_t* tip = gameModeOn  ? L"Steam Controller Remapper - Steamless Mode ON"
-                       : connected   ? L"Steam Controller Remapper - Connected (Steamless Mode OFF)"
-                                     : L"Steam Controller Remapper - No controller found";
+    const wchar_t* tip = gameModeOn  ? L"NonSteamController - Steamless Mode ON"
+                       : connected   ? L"NonSteamController - Connected (Steamless Mode OFF)"
+                                     : L"NonSteamController - No controller found";
 
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
@@ -1209,10 +1220,12 @@ void TrayApp::SetStartupEnabled(bool enabled) {
         RegSetValueExW(key, APP_NAME, 0, REG_SZ,
                        reinterpret_cast<const BYTE*>(command.c_str()),
                        static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+        RegDeleteValueW(key, PREV_APP_NAME);
         RegDeleteValueW(key, LEGACY_APP_NAME);
         RegDeleteValueW(key, OLD_APP_NAME);
     } else {
         RegDeleteValueW(key, APP_NAME);
+        RegDeleteValueW(key, PREV_APP_NAME);
         RegDeleteValueW(key, LEGACY_APP_NAME);
         RegDeleteValueW(key, OLD_APP_NAME);
     }
