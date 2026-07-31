@@ -57,6 +57,39 @@ jobs:
           Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
           "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Build standalone installer
+        shell: pwsh
+        run: |
+          $out    = Join-Path $PWD "build\release\Release"
+          $stage  = Join-Path $PWD "installer\staging"
+          New-Item -ItemType Directory -Force -Path "$stage\Desktop","$stage\usbip" | Out-Null
+          Copy-Item (Join-Path $out "Steam Controller Remapper.exe") "$stage\Desktop"
+          Copy-Item (Join-Path $out "libVIIPER.dll")                "$stage\Desktop"
+
+          # The driver is what makes this a first-time install rather than an
+          # update, so fetch the current signed usbip-win2 release.
+          $rel = Invoke-RestMethod -Headers @{ 'User-Agent' = 'NonSteamControllerBuild' } `
+                   -Uri 'https://api.github.com/repos/vadimgrn/usbip-win2/releases/latest'
+          $asset = $rel.assets | Where-Object { $_.name -like '*x64*.exe' } | Select-Object -First 1
+          if (-not $asset) { throw "No x64 .exe asset in the latest usbip-win2 release." }
+          Write-Host "usbip-win2: $($rel.tag_name) / $($asset.name)"
+          Invoke-WebRequest -Headers @{ 'User-Agent' = 'NonSteamControllerBuild' } `
+            -Uri $asset.browser_download_url -OutFile "$stage\usbip\USBip-win2-x64.exe"
+
+          choco install innosetup -y --no-progress
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+
+          # Inno rejects a leading 'v' in AppVersion.
+          $ver = ($env:GITHUB_REF_NAME -replace '^v','')
+          & $iscc "/DMyAppVersion=$ver" "installer\NonSteamController-Standalone.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+
+          $setup = Get-ChildItem "installer\output\*Setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw "Installer not produced." }
+          "SETUP=$($setup.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Built $($setup.Name) ($([math]::Round($setup.Length/1MB,2)) MB)"
+
       - name: Publish release
         shell: pwsh
         env:
@@ -67,15 +100,24 @@ jobs:
           # cannot coexist with a YAML block scalar's indentation.
           $tag = $env:GITHUB_REF_NAME
           $notes = @(
-            "Portable build of ``$tag``."
+            "### Install"
             ''
-            '**This is not a first-time install.** It contains only the app and'
-            '`libVIIPER.dll` — it does not install the usbip-win2 kernel driver'
-            'or the Xbox Game Bar widget. Use it to update an existing install,'
-            'or install the usbip-win2 driver yourself first.'
+            'Download the **Setup.exe** and run it. It is self-contained: it installs'
+            'the app and, on a fresh machine, the signed usbip-win2 driver the virtual'
+            'controller needs. Administrator rights are required for the driver.'
             ''
-            'No signed installer is built here. See `.github/workflows/release.yml`'
-            'for why, and for how to enable one with a signing certificate.'
+            'The **portable zip** is an update path only — app plus `libVIIPER.dll`,'
+            'no driver. Use it if you already have a working install.'
+            ''
+            '### Notes'
+            ''
+            'The installer does not include the Xbox Game Bar widget. That part is an'
+            'MSIX and a sideloadable MSIX must be signed, which CI cannot do without a'
+            'certificate — see `.github/workflows/release.yml`. Everything in the tray'
+            'app itself is unaffected. It installs under its own AppId, so it will not'
+            'replace a widget-enabled install.'
+            ''
+            'SmartScreen will warn on first run: these builds are unsigned.'
             ''
             'Requires Windows 10+ (64-bit) and a 2026 Steam Controller.'
           ) -join "`n"
@@ -86,7 +128,9 @@ jobs:
           # prerelease; a plain vX.Y.Z becomes a full release. GitHub's
           # /releases/latest endpoint excludes prereleases, so the in-app updater
           # will not offer one to users.
-          $gh = @('release','create',"$tag","$env:ZIP",'--title',"$tag",'--notes-file',"$notesFile")
+          # Setup.exe listed first so it is the obvious download.
+          $gh = @('release','create',"$tag","$env:SETUP","$env:ZIP",
+                  '--title',"$tag",'--notes-file',"$notesFile")
           if ($tag -match '-') {
               $gh += '--prerelease'
               Write-Host "Publishing $tag as a prerelease."
