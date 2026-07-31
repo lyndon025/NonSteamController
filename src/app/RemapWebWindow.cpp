@@ -252,6 +252,16 @@ main{flex:1 1 auto; overflow-y:auto; padding:16px 20px 8px; display:flex; gap:20
   box-shadow:0 0 0 4px rgba(102,192,244,.22);
 }
 .padhint{margin-top:8px; color:var(--text-faint); font-size:12px; text-align:center}
+.srcbtns{margin-top:8px; display:flex; gap:8px}
+.src{display:flex; align-items:center; gap:10px; padding:8px 12px}
+.src+.src{border-top:1px solid rgba(255,255,255,.04)}
+.src .path{
+  flex:1 1 auto; min-width:0; color:var(--text-mute); font-size:12.5px;
+  font-family:'JetBrains Mono',ui-monospace,monospace;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl; text-align:left;
+}
+.src button{padding:3px 9px; font-size:12px}
+.empty{padding:10px 12px; color:var(--text-faint); font-size:12.5px; font-style:italic}
 .group{margin-bottom:18px}
 .group>h2{
   margin:0 0 8px; font-size:11px; letter-spacing:1.4px; text-transform:uppercase;
@@ -333,9 +343,20 @@ button.primary:hover{filter:brightness(1.12)}
       <label for="key" id="keyL">Keys</label>
       <input type="text" id="key" readonly placeholder="Click, then press the keys">
       <div class="full chk"><input type="checkbox" id="rapid"><label for="rapid">Rapid fire while held</label></div>
-      <div class="full"><button class="primary" id="apply">Apply to <span id="applyName"></span></button></div>
+      <div class="full">
+        <button class="primary" id="apply">Apply to <span id="applyName"></span></button>
+        <button id="rec">Record macro…</button>
+      </div>
     </div>
     <div id="groups"></div>
+    <div class="group">
+      <h2>Game library sources</h2>
+      <div class="rows" id="srcs"></div>
+      <div class="srcbtns">
+        <button id="addf">Add folder…</button>
+        <button id="adde">Add .exe…</button>
+      </div>
+    </div>
   </div>
 </main>
 <footer>
@@ -389,10 +410,31 @@ function renderProfiles(){
   }
 }
 
+function renderSources(){
+  const host=$('srcs');
+  host.innerHTML='';
+  const list=state.sources||[];
+  if(!list.length){
+    const e=document.createElement('div');
+    e.className='empty';
+    e.textContent='No sources yet. Add a folder or an .exe so games can be detected.';
+    host.appendChild(e);
+    return;
+  }
+  for(const spec of list){
+    const r=document.createElement('div'); r.className='src';
+    const p=document.createElement('div'); p.className='path'; p.textContent=spec; p.title=spec;
+    const b=document.createElement('button'); b.textContent='Remove';
+    b.onclick=()=>send({cmd:'delsource', spec:spec});
+    r.appendChild(p); r.appendChild(b); host.appendChild(r);
+  }
+}
+
 function render(){
   $('prof').textContent = state.profile ? 'profile: '+state.profile : '';
   $('auto').checked = !!state.autoSwitch;
   renderProfiles();
+  renderSources();
   renderPad();
   const seen=[], host=$('groups');
   host.innerHTML='';
@@ -471,6 +513,13 @@ $('close').onclick=()=>send({cmd:'close'});
 $('adv').onclick=()=>send({cmd:'advanced'});
 $('prof2').onchange=()=>send({cmd:'profile', profile:$('prof2').value});
 $('auto').onchange=()=>send({cmd:'autoswitch', on:$('auto').checked?1:0});
+$('addf').onclick=()=>send({cmd:'addsource'});
+$('adde').onclick=()=>send({cmd:'addexe'});
+$('rec').onclick=()=>{
+  const b=cur(); if(!b) return;
+  $('hint').textContent='Recording macro for '+b.name+'…';
+  send({cmd:'macro', index:b.index});
+};
 $('apply').onclick=()=>{
   const b=cur(); if(!b) return;
   const t=$('type').value;
@@ -677,6 +726,17 @@ void RemapWebWindow::PostState() {
     }
     json += L"]";
 
+    json += L",\"sources\":[";
+    if (m_cb.sourcesGet) {
+        bool firstSource = true;
+        for (const std::wstring& spec : m_cb.sourcesGet()) {
+            if (!firstSource) json += L',';
+            firstSource = false;
+            json += L'"' + JsonEscape(spec) + L'"';
+        }
+    }
+    json += L"]";
+
     json += L",\"buttons\":[";
     bool first = true;
     for (const ButtonMeta& meta : kButtons) {
@@ -739,6 +799,57 @@ void RemapWebWindow::OnWebMessage(const std::wstring& json) {
         int on = 0;
         if (!JsonIntField(json, L"on", on)) return;
         if (m_cb.autoSwitchSet) m_cb.autoSwitchSet(on != 0);
+        PostState();
+        return;
+    }
+    if (cmd == L"macro") {
+        int index = -1;
+        if (!JsonIntField(json, L"index", index) || !m_cb.recordMacro) return;
+        // Modal: the recorder owns the keyboard hook while it is up.
+        const std::wstring text = m_cb.recordMacro(m_hwnd, L"");
+        if (!text.empty() && m_cb.apply) {
+            // Prefixed so a single-step recording is still parsed as a timed
+            // macro rather than a plain key chord — same reason the Win32 editor
+            // prefixes it.
+            m_cb.apply(index, L"macro:" + text);
+        }
+        PostState();
+        return;
+    }
+    if (cmd == L"addsource" || cmd == L"addexe") {
+        if (!m_cb.sourcesGet || !m_cb.sourcesSet) return;
+        PickPathFn picker = (cmd == L"addexe") ? m_cb.pickExe : m_cb.pickFolder;
+        if (!picker) return;
+        const std::wstring path = picker(m_hwnd);
+        if (path.empty()) return;
+
+        // Spec format is the backend's own: "DIR|<path>" / "EXE|<path>". The
+        // "[Folder] X" text seen in the old editor was its display form, not
+        // what is stored.
+        const std::wstring spec = (cmd == L"addexe") ? (L"EXE|" + path)
+                                                     : (L"DIR|" + path);
+        std::vector<std::wstring> specs = m_cb.sourcesGet();
+        for (const std::wstring& existing : specs) {
+            if (_wcsicmp(existing.c_str(), spec.c_str()) == 0) {
+                PostState();
+                return;  // already present
+            }
+        }
+        specs.push_back(spec);
+        m_cb.sourcesSet(specs);
+        PostState();
+        return;
+    }
+    if (cmd == L"delsource") {
+        std::wstring spec;
+        if (!JsonStringField(json, L"spec", spec)) return;
+        if (!m_cb.sourcesGet || !m_cb.sourcesSet) return;
+        std::vector<std::wstring> kept;
+        for (const std::wstring& existing : m_cb.sourcesGet()) {
+            if (_wcsicmp(existing.c_str(), spec.c_str()) != 0)
+                kept.push_back(existing);
+        }
+        m_cb.sourcesSet(kept);
         PostState();
         return;
     }

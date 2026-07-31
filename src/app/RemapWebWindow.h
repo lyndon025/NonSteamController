@@ -40,6 +40,15 @@ public:
     // Auto-switch-profiles toggle state and setter.
     using AutoSwitchGetFn = std::function<bool()>;
     using AutoSwitchSetFn = std::function<void(bool)>;
+    // Game library sources, as the "[Folder] X" / exe-path specs the backend uses.
+    using SourcesGetFn = std::function<std::vector<std::wstring>()>;
+    using SourcesSetFn = std::function<void(const std::vector<std::wstring>&)>;
+    // Runs the modal macro recorder over `owner` and returns its text, or empty
+    // if cancelled. Stays a host callback because recording uses a WH_KEYBOARD_LL
+    // hook to see keys system-wide, which an in-page handler cannot do.
+    using RecordMacroFn = std::function<std::wstring(HWND owner, const std::wstring& initial)>;
+    // Opens a native folder / executable picker. A page cannot show these.
+    using PickPathFn = std::function<std::wstring(HWND owner)>;
 
     struct Callbacks {
         QueryFn         query;
@@ -49,6 +58,11 @@ public:
         SwitchProfileFn switchProfile;
         AutoSwitchGetFn autoSwitchGet;
         AutoSwitchSetFn autoSwitchSet;
+        SourcesGetFn    sourcesGet;
+        SourcesSetFn    sourcesSet;
+        RecordMacroFn   recordMacro;
+        PickPathFn      pickFolder;
+        PickPathFn      pickExe;
     };
 
     RemapWebWindow() = default;

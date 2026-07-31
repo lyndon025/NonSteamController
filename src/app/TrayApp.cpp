@@ -1,11 +1,14 @@
 #include "TrayApp.h"
 #include "ControllerManager.h"
+#include "MacroRecorder.h"
 #include "PaddleConfig.h"
 #include "PaddleConfigWindow.h"
 #include "SteamLibrary.h"
 #include "logging/Log.h"
 #include "resource.h"
 #include <algorithm>
+#include <commdlg.h>
+#include <shlobj.h>
 #include <chrono>
 #include <cctype>
 #include <cstring>
@@ -1334,6 +1337,38 @@ void TrayApp::LoadPaddleConfig() {
     m_remapBackend.Load(legacyMappings, legacyActions);
 }
 
+// Native pickers for the web editor's game-source list. A page cannot show these,
+// so the page asks and the host opens them. Returns an empty string on cancel.
+static std::wstring PickFolderDialog(HWND owner) {
+    BROWSEINFOW bi{};
+    bi.hwndOwner = owner;
+    bi.lpszTitle = L"Choose your Steam library or games folder";
+    bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+
+    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+    if (!pidl)
+        return {};
+
+    wchar_t path[MAX_PATH] = {};
+    const bool ok = SHGetPathFromIDListW(pidl, path) != FALSE;
+    CoTaskMemFree(pidl);
+    return ok ? std::wstring(path) : std::wstring();
+}
+
+static std::wstring PickExeDialog(HWND owner) {
+    OPENFILENAMEW ofn{};
+    wchar_t path[MAX_PATH] = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner   = owner;
+    ofn.lpstrFilter = L"Executable Files\0*.exe\0All Files\0*.*\0";
+    ofn.lpstrFile   = path;
+    ofn.nMaxFile    = MAX_PATH;
+    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (!GetOpenFileNameW(&ofn))
+        return {};
+    return path;
+}
+
 void TrayApp::ShowRemapEditor() {
     // Prefer the Steam-styled WebView2 editor. The Win32 window remains the
     // fallback when the runtime is absent, and still hosts the surfaces the web
@@ -1379,6 +1414,22 @@ void TrayApp::ShowRemapEditor() {
     };
     cb.autoSwitchGet = [this]() { return GetAutoSwitchProfiles(); };
     cb.autoSwitchSet = [this](bool on) { SetAutoSwitchProfiles(on); };
+    cb.sourcesGet    = [this]() { return m_remapBackend.GetGameSourceSpecs(); };
+    cb.sourcesSet    = [this](const std::vector<std::wstring>& specs) {
+        m_remapBackend.SetGameSourceSpecs(specs);
+        m_remapBackend.RefreshInstalledGames();
+        PublishWidgetState();
+    };
+    // Kept on the host side because it installs a WH_KEYBOARD_LL hook to observe
+    // keys system-wide, which a page cannot do.
+    cb.recordMacro = [](HWND owner, const std::wstring& initial) -> std::wstring {
+        std::wstring text;
+        if (!MacroRecorder::Record(owner, text, initial))
+            return {};
+        return text;
+    };
+    cb.pickFolder = [](HWND owner) { return PickFolderDialog(owner); };
+    cb.pickExe    = [](HWND owner) { return PickExeDialog(owner); };
 
     const bool opened = m_remapWebWindow->Open(
         m_hInstance, m_remapBackend.GetActiveProfileId(), std::move(cb));
