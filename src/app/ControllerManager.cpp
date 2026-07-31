@@ -103,6 +103,14 @@ void ControllerManager::ClearProbeCooldowns() {
         g_ctrl->ClearProbeCooldowns();
 }
 
+void ControllerManager::ReleaseExclusiveIfHeld() {
+    if (!m_hasExclusiveAccess)
+        return;
+    m_hasExclusiveAccess = false;
+    if (g_ctrl && g_ctrl->IsOpen())
+        g_ctrl->ReleaseToShared();
+}
+
 void ControllerManager::OnResume() {
     logging::Logf("[ControllerManager] OnResume");
     m_outputBackendMissing = false;
@@ -118,11 +126,26 @@ void ControllerManager::EnableGameMode() {
                   m_connected ? 1 : 0, m_gameModeActive ? 1 : 0);
     if (!m_connected || m_gameModeActive) return;
     m_outputBackendMissing = false;
+
+    // Deny Steam write access for as long as we are emulating. With this,
+    // Steam's Desktop Configuration cannot drive the controller underneath us,
+    // so running alongside an idle Steam needs no Steam-side configuration.
+    //
+    // Unlike SteamlessController, a failed claim is not fatal here. Steamless
+    // returns early and game mode simply does not activate; that leaves the app
+    // useless whenever Steam got a write handle first. Falling back to shared
+    // keeps it working — the only cost is that Steam may compete on the desktop,
+    // which is recoverable and visible in the log.
+    m_hasExclusiveAccess = g_ctrl->ClaimExclusive();
+    if (!m_hasExclusiveAccess)
+        logging::Logf("[ControllerManager] Continuing in shared mode; Steam may also drive the pad");
+
     g_ctrl->SetDesktopTrackpadMouseMode(
         kEnableFirmwareTrackpadMouse && m_trackpadMouseEnabled,
         m_useLeftTrackpad);
     if (!g_ctrl->DisableLizardMode()) {
         logging::Logf("[ControllerManager] EnableGameMode failed at DisableLizardMode");
+        ReleaseExclusiveIfHeld();
         return;
     }
 
@@ -142,6 +165,10 @@ void ControllerManager::EnableGameMode() {
                       missing ? 1 : 0);
         m_virtual.reset();
         g_ctrl->EnableLizardMode();
+        // Steamless omits this on its equivalent path, leaving the device held
+        // exclusively with lizard mode already restored — Steam then cannot use
+        // a controller nobody is emulating.
+        ReleaseExclusiveIfHeld();
         if (missing) m_onStateChanged(m_connected, m_gameModeActive, /*outputBackendMissing=*/true);
         return;
     }
@@ -184,6 +211,9 @@ void ControllerManager::DisableGameMode() {
     m_paddleOverlay.Reset();
     m_virtual.reset();
     g_ctrl->EnableLizardMode();
+    // Hand write access back so Steam Input can drive the controller again. The
+    // read loop is already stopped above, which Reopen requires.
+    ReleaseExclusiveIfHeld();
     m_gameModeActive = false;
     m_onStateChanged(m_connected, m_gameModeActive, false);
 }
@@ -320,6 +350,8 @@ void ControllerManager::Close(bool restoreLizard) {
     }
     m_connected      = false;
     m_gameModeActive = false;
+    // The handle is gone, so any exclusive claim went with it.
+    m_hasExclusiveAccess   = false;
     m_outputBackendMissing = false;
     m_onStateChanged(m_connected, m_gameModeActive, false);
 }

@@ -78,6 +78,11 @@ public:
     void SetPaddleMapping(int paddleIndex, PaddleMapping mapping);
     void SetPaddleActions(PaddleActionBindings actions);
 
+    // True while we hold write access exclusively, i.e. Steam Input cannot drive
+    // the controller. False means we are coexisting with Steam and it may also
+    // be acting on the pad.
+    bool HasExclusiveAccess()      const { return m_hasExclusiveAccess; }
+
     bool IsConnected()             const { return m_connected; }
     bool IsGameModeActive()        const { return m_gameModeActive; }
     bool IsOutputBackendMissing()  const { return m_outputBackendMissing; }
@@ -100,10 +105,12 @@ private:
     void StopReadLoop();
     void ReadLoop();
     void PulseTrackpadClickHaptics(uint8_t strength);
+    void ReleaseExclusiveIfHeld();
 
     StateChangedFn                     m_onStateChanged;
     bool                               m_connected            = false;
     bool                               m_gameModeActive       = false;
+    bool                               m_hasExclusiveAccess   = false;
     bool                               m_outputBackendMissing = false;
     bool                               m_trackpadMouseEnabled = true;
     bool                               m_backButtonsEnabled   = false;

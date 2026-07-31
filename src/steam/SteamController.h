@@ -175,6 +175,22 @@ public:
     // Path this instance currently has open, or empty.
     const std::wstring& DevicePath() const { return m_devicePath; }
 
+    // Denies other processes write access to the controller, so Steam Input
+    // cannot drive it while we are emulating. This is what keeps Steam's Desktop
+    // Configuration from fighting us on the desktop, and it means no Steam-side
+    // setting is required.
+    //
+    // Returns false when another process already holds a write handle, in which
+    // case shared access is restored so the device stays usable — the caller can
+    // then choose to continue in shared mode rather than give up.
+    //
+    // Call with the read loop stopped, before DisableLizardMode.
+    bool ClaimExclusive();
+
+    // Restores shared access so Steam can obtain write access again. Call when
+    // yielding, after EnableLizardMode, with the read loop stopped.
+    void ReleaseToShared();
+
     // Two-step sequence: clears digital mappings + sets trackpads to NONE.
     // Starts the background heartbeat thread on first call.
     bool DisableLizardMode();

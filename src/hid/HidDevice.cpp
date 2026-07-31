@@ -79,20 +79,31 @@ std::vector<std::wstring> HidDevice::Enumerate(uint16_t vid, uint16_t pid, uint1
 // Move semantics
 // ---------------------------------------------------------------------------
 
+// m_featureReportLen was previously dropped by both move operations, silently
+// reverting a moved-from device to the 64-byte default. m_path must move too,
+// or Reopen would fail on a moved device.
 HidDevice::HidDevice(HidDevice&& o) noexcept
-    : m_handle(o.m_handle), m_event(o.m_event), m_outputReportLen(o.m_outputReportLen) {
+    : m_path(std::move(o.m_path)),
+      m_handle(o.m_handle),
+      m_event(o.m_event),
+      m_outputReportLen(o.m_outputReportLen),
+      m_featureReportLen(o.m_featureReportLen) {
     o.m_handle = INVALID_HANDLE_VALUE;
     o.m_event  = INVALID_HANDLE_VALUE;
+    o.m_path.clear();
 }
 
 HidDevice& HidDevice::operator=(HidDevice&& o) noexcept {
     if (this != &o) {
         Close();
-        m_handle          = o.m_handle;
-        m_event           = o.m_event;
-        m_outputReportLen = o.m_outputReportLen;
+        m_path             = std::move(o.m_path);
+        m_handle           = o.m_handle;
+        m_event            = o.m_event;
+        m_outputReportLen  = o.m_outputReportLen;
+        m_featureReportLen = o.m_featureReportLen;
         o.m_handle = INVALID_HANDLE_VALUE;
         o.m_event  = INVALID_HANDLE_VALUE;
+        o.m_path.clear();
     }
     return *this;
 }
@@ -140,8 +151,40 @@ bool HidDevice::Open(const std::wstring& path) {
         }
         HidD_FreePreparsedData(preparsed);
     }
+    m_path = path;
     logging::Logf("[HidDevice] Open success outputLen=%lu featureLen=%lu",
                   m_outputReportLen, m_featureReportLen);
+    return true;
+}
+
+bool HidDevice::Reopen(DWORD shareMode) {
+    if (m_path.empty()) return false;
+    const std::wstring savedPath = m_path;
+
+    // Cancel pending I/O before closing so any overlapped read drains cleanly.
+    // The caller guarantees the read thread is stopped (see the header).
+    if (m_handle != INVALID_HANDLE_VALUE) {
+        CancelIo(m_handle);
+        CloseHandle(m_handle);
+        m_handle = INVALID_HANDLE_VALUE;
+    }
+
+    m_handle = CreateFileW(savedPath.c_str(),
+                           GENERIC_READ | GENERIC_WRITE,
+                           shareMode,
+                           nullptr,
+                           OPEN_EXISTING,
+                           FILE_FLAG_OVERLAPPED,
+                           nullptr);
+    if (m_handle == INVALID_HANDLE_VALUE) {
+        logging::Logf("[HidDevice] Reopen failed shareMode=0x%lX error=%lu",
+                      shareMode, GetLastError());
+        return false;
+    }
+
+    // m_event and the report lengths are intentionally kept: same device.
+    m_path = savedPath;
+    logging::Logf("[HidDevice] Reopen success shareMode=0x%lX", shareMode);
     return true;
 }
 
@@ -155,6 +198,8 @@ void HidDevice::Close() {
         CloseHandle(m_event);
         m_event = INVALID_HANDLE_VALUE;
     }
+    // Cleared so a later Reopen cannot resurrect a device we deliberately let go.
+    m_path.clear();
 }
 
 // ---------------------------------------------------------------------------

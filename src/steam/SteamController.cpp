@@ -229,6 +229,33 @@ static uint16_t ScaleMotorToAmplitude(uint8_t motor) {
     return static_cast<uint16_t>((static_cast<uint32_t>(motor) * 0x7FFFu) / 0xFFu);
 }
 
+// ---------------------------------------------------------------------------
+// Exclusive access control
+//
+// Ported from SteamlessController, whose model this follows: shared while idle
+// so Steam can coexist and we can still track connect/disconnect, exclusive
+// only while actively emulating, shared again on yield. Denying write access is
+// what stops Steam Input's Desktop Configuration driving the pad underneath us.
+// ---------------------------------------------------------------------------
+
+bool SteamController::ClaimExclusive() {
+    // FILE_SHARE_READ without FILE_SHARE_WRITE: others may read, none may write.
+    if (m_device.Reopen(FILE_SHARE_READ)) {
+        logging::Logf("[SteamController] ClaimExclusive success");
+        return true;
+    }
+    // Another process holds a write handle. Reopen already closed our old one,
+    // so restore shared access rather than leaving the device shut.
+    m_device.Reopen(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    logging::Logf("[SteamController] ClaimExclusive failed — another process holds write access");
+    return false;
+}
+
+void SteamController::ReleaseToShared() {
+    m_device.Reopen(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    logging::Logf("[SteamController] ReleaseToShared");
+}
+
 void SteamController::Close() {
     logging::Logf("[SteamController] Close");
     if (m_running.exchange(false) && m_heartbeat.joinable())

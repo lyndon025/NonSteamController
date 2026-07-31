@@ -18,10 +18,23 @@ public:
     HidDevice(HidDevice&& o) noexcept;
     HidDevice& operator=(HidDevice&& o) noexcept;
 
-    // Open with exclusive write access. Returns false if device is in use or not found.
+    // Opens with shared access (FILE_SHARE_READ | FILE_SHARE_WRITE), so another
+    // process such as Steam can hold the device at the same time. Use Reopen to
+    // change the share mode afterwards.
     bool Open(const std::wstring& path);
     void Close();
     bool IsOpen() const { return m_handle != INVALID_HANDLE_VALUE; }
+
+    // Reopens the same path with a different share mode, keeping the event and
+    // cached report lengths (same physical device, so they still apply).
+    //
+    // Passing FILE_SHARE_READ alone denies other processes write access, which
+    // is how Steam is kept from driving the controller while we are emulating.
+    // Fails if another process already holds write access.
+    //
+    // The caller MUST ensure no read thread is running: this cancels pending
+    // overlapped I/O and swaps the handle out from under it otherwise.
+    bool Reopen(DWORD shareMode);
 
     // Send a HID output report (interrupt OUT / SET_REPORT Output type).
     // data[0] must be the report ID. Padded to OutputReportByteLength automatically.
@@ -43,6 +56,7 @@ public:
     size_t ReadInputReport(uint8_t* buffer, size_t size, uint32_t timeoutMs = 1000);
 
 private:
+    std::wstring m_path;      // retained so Reopen can change the share mode
     HANDLE m_handle           = INVALID_HANDLE_VALUE;
     HANDLE m_event            = INVALID_HANDLE_VALUE;
     ULONG  m_outputReportLen  = 64;
