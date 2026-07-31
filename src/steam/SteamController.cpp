@@ -101,7 +101,18 @@ SteamController::InputReportKind SteamController::ClassifyInputReport(const uint
     if (reportId == REPORT_STATE && size >= 30)
         return InputReportKind::LegacyState;
 
-    if (reportId == REPORT_STATUS || reportId == REPORT_UNKNOWN_79 || reportId == REPORT_UNKNOWN_7B)
+    // Housekeeping IDs count as housekeeping only at their documented small
+    // sizes. Observed on a 2026 dongle: 0x79 also arrives at 54 bytes carrying a
+    // full state payload —
+    //   79 02 00 00 00 00 00 00 00 00 DF 02 CF 02 77 FE 4E FF ...
+    //      seq  buttons (none)        LX    LY    RX    RY
+    // which decodes as resting stick drift against the 0x42 layout. Classifying
+    // that as non-state made the open probe reject the one interface that was
+    // actually alive, so the controller read as disconnected until a 0x42
+    // happened to land inside the 80ms probe window. Only the size-carrying
+    // check below can tell these apart, so let it run.
+    if (size < 30 &&
+        (reportId == REPORT_STATUS || reportId == REPORT_UNKNOWN_79 || reportId == REPORT_UNKNOWN_7B))
         return InputReportKind::NonState;
 
     // Be tolerant of firmware changes that keep the same payload shape but change
@@ -170,6 +181,9 @@ bool SteamController::Open(const Candidate& candidate) {
     // claiming the interface, otherwise a sleeping slot becomes a virtual pad
     // that never moves.
     constexpr uint32_t kProbeTimeoutMs = 80;
+
+    // Fresh interface, so any previous loss verdict no longer applies.
+    m_deviceLost.store(false);
 
     logging::Logf("[SteamController] Trying path pid=%04X path=%s",
                   candidate.pid, logging::Narrow(candidate.path).c_str());
@@ -252,6 +266,7 @@ void SteamController::ReleaseToShared() {
 
 void SteamController::Close() {
     logging::Logf("[SteamController] Close");
+    m_deviceLost.store(false);
     if (m_running.exchange(false) && m_heartbeat.joinable())
         m_heartbeat.join();
     {
@@ -384,11 +399,35 @@ void SteamController::HeartbeatLoop() {
     BuildCmd(buf, CMD_CLEAR_DIGITAL_MAPPINGS);
     logging::Logf("[SteamController] Heartbeat start");
 
+    // A wireless controller that powers off leaves the handle open while every
+    // feature report fails with ERROR_GEN_FAILURE. The result used to be this
+    // loop retrying at 800ms forever — a log showed 70 minutes of it, with the
+    // tray still claiming the pad was connected. Give up after a few consecutive
+    // failures and flag the device lost so the manager can close and rediscover.
+    //
+    // Consecutive, not cumulative: an isolated failure while the pad is awake is
+    // normal and must not tear down a working session.
+    constexpr int kMaxConsecutiveFailures = 5;  // ~4s
+    int consecutiveFailures = 0;
+
     while (m_running.load()) {
+        bool ok = false;
         {
             std::lock_guard<std::mutex> lock(m_featureMutex);
-            m_device.SendFeatureReport(buf, sizeof(buf));
+            ok = m_device.SendFeatureReport(buf, sizeof(buf));
         }
+
+        if (ok) {
+            consecutiveFailures = 0;
+        }
+        else if (++consecutiveFailures >= kMaxConsecutiveFailures) {
+            logging::Logf("[SteamController] Heartbeat failed %d times consecutively; "
+                          "treating device as lost",
+                          consecutiveFailures);
+            m_deviceLost.store(true);
+            break;
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(800));
     }
 

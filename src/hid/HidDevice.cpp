@@ -132,8 +132,11 @@ bool HidDevice::Open(const std::wstring& path) {
         return false;
     }
 
+    // CreateEventW reports failure with NULL, not INVALID_HANDLE_VALUE, so the
+    // old check let a failed event through and every later read failed instead.
     m_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (m_event == INVALID_HANDLE_VALUE) {
+    if (m_event == nullptr || m_event == INVALID_HANDLE_VALUE) {
+        m_event = INVALID_HANDLE_VALUE;
         CloseHandle(m_handle);
         m_handle = INVALID_HANDLE_VALUE;
         logging::Logf("[HidDevice] CreateEvent failed error=%lu", GetLastError());
@@ -258,7 +261,11 @@ bool HidDevice::WriteOutputPacket(const uint8_t* data, size_t size, uint32_t tim
 
         DWORD wait = WaitForSingleObject(m_event, timeoutMs);
         if (wait != WAIT_OBJECT_0) {
+            // Same reason as ReadInputReport: wait for the cancellation to land
+            // so the driver is done with this stack-local OVERLAPPED.
             CancelIo(m_handle);
+            DWORD cancelledBytes = 0;
+            GetOverlappedResult(m_handle, &ov, &cancelledBytes, TRUE);
             logging::Logf("[HidDevice] WriteOutputPacket timeout reportId=0x%02X wait=%lu",
                           size > 0 ? data[0] : 0, wait);
             return false;
@@ -291,7 +298,20 @@ size_t HidDevice::ReadInputReport(uint8_t* buffer, size_t size, uint32_t timeout
 
         DWORD wait = WaitForSingleObject(m_event, timeoutMs);
         if (wait != WAIT_OBJECT_0) {
+            // CancelIo only *requests* cancellation; the read may still be in
+            // flight when it returns. ov lives on this stack frame and m_event is
+            // shared with the next read, so returning here without waiting left
+            // the driver free to write a completion into a frame we had already
+            // abandoned, and to signal an event the next read had just reset.
+            // The read loop times out constantly, so this fired several times a
+            // second. Wait for the cancellation to land before letting ov die.
             CancelIo(m_handle);
+            DWORD cancelledBytes = 0;
+            if (GetOverlappedResult(m_handle, &ov, &cancelledBytes, TRUE) && cancelledBytes > 0) {
+                // Raced us: the report arrived as we gave up on it. Keep it
+                // rather than throwing away a frame we already paid for.
+                return static_cast<size_t>(cancelledBytes);
+            }
             return 0;
         }
         if (!GetOverlappedResult(m_handle, &ov, &bytesRead, FALSE))

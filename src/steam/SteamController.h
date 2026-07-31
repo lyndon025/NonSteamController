@@ -164,6 +164,14 @@ public:
     void Close();
     bool IsOpen() const { return m_device.IsOpen(); }
 
+    // True once the heartbeat has failed repeatedly: the handle is still open but
+    // the hardware behind it has stopped answering, which is what a wireless
+    // controller powering off looks like. Callers must treat this as a
+    // disconnect — without it the app keeps reporting the pad as connected while
+    // every feature report fails, which a captured log showed doing so for over
+    // an hour straight.
+    bool IsDeviceLost() const { return m_deviceLost.load(); }
+
     // Path this instance currently has open, or empty.
     const std::wstring& DevicePath() const { return m_devicePath; }
 
@@ -223,6 +231,7 @@ private:
     std::mutex         m_rumbleMutex;
     std::condition_variable m_rumbleCv;
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_deviceLost{false};
     bool              m_rumbleStop = false;
     uint8_t           m_largeMotor = 0;
     uint8_t           m_smallMotor = 0;

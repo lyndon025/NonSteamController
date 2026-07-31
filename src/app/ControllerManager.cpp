@@ -85,8 +85,18 @@ void ControllerManager::OnDeviceChange() {
         logging::Logf("[ControllerManager] Released potential native shell keys on device-change while disconnected");
         TryOpen();
     }
-    else if (g_ctrl && !g_ctrl->IsOpen())
+    else if (g_ctrl && !g_ctrl->IsOpen()) {
         Close(/*restoreLizard=*/false);
+    }
+    else if (g_ctrl && g_ctrl->IsDeviceLost()) {
+        // Handle still open, but the hardware stopped answering — what a wireless
+        // pad powering off looks like. Tear down without restoring lizard mode:
+        // those feature reports are the ones already failing, so attempting them
+        // only logs another error. Rediscovery happens immediately after.
+        logging::Logf("[ControllerManager] Device stopped responding; releasing it");
+        Close(/*restoreLizard=*/false);
+        TryOpen();
+    }
 }
 
 void ControllerManager::OnSuspend() {
