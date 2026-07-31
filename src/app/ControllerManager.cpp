@@ -177,6 +177,16 @@ void ControllerManager::DisableGameMode() {
     m_onStateChanged(m_connected, m_gameModeActive, false);
 }
 
+void ControllerManager::ReleaseDevices() {
+    logging::Logf("[ControllerManager] ReleaseDevices connected=%d active=%d",
+                  m_connected ? 1 : 0, m_gameModeActive ? 1 : 0);
+    DisableGameMode();
+    // Close(false) rather than Close(true): DisableGameMode already restored
+    // lizard mode, and passing true would skip it anyway now that game mode is
+    // off. What matters here is that the handle goes away.
+    Close(false);
+}
+
 void ControllerManager::DetachVirtual() {
     if (!m_gameModeActive || !m_virtual) return;
     logging::Logf("[ControllerManager] DetachVirtual");

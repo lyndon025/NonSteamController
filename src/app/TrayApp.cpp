@@ -661,7 +661,8 @@ bool TrayApp::Init(HINSTANCE hInstance) {
     m_ipcServer = std::make_unique<RemapIpcServer>(
         [this](const std::string& request) { return HandleIpcRequest(request); });
 
-    m_steamRunning = IsSteamRunning();
+    m_steamState   = SteamWatcher::Detect();
+    m_steamRunning = (m_steamState != SteamState::NoSteam);
     LoadSettings();
     LoadPaddleConfig();
     CheckControllerReportSignature();
@@ -680,7 +681,13 @@ bool TrayApp::Init(HINSTANCE hInstance) {
         logging::Logf("[WidgetBridge] Cleared stale widget request/response files at startup");
     }
     PublishWidgetState();
-    ReconcileAutoMode();
+
+    // The callback fires on the watcher thread, so marshal to the UI thread
+    // before touching controller or UI state. Start() also fires once
+    // immediately, which is what asserts the correct mode at startup.
+    m_steamWatcher.Start([this](SteamState state) {
+        PostMessageW(m_hwnd, WM_STEAMSTATE, static_cast<WPARAM>(state), 0);
+    });
     return true;
 }
 
@@ -725,7 +732,7 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_TOGGLE:
             if (m_controller->IsGameModeActive())
                 m_controller->DisableGameMode();
-            else if (!m_steamRunning)
+            else if (m_autoMode == AutoMode::Manual || WantControl(m_steamState))
                 m_controller->EnableGameMode();
             break;
         case IDM_TRACKPAD:
@@ -739,11 +746,9 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_STARTUP:
             SetStartupEnabled(!IsStartupEnabled());
             break;
-        case IDM_AUTOENABLE:
-            m_autoEnableSteamlessMode = !m_autoEnableSteamlessMode;
-            SaveSettings();
-            ReconcileAutoMode();
-            break;
+        case IDM_MODE_MANUAL: SetAutoMode(AutoMode::Manual);        break;
+        case IDM_MODE_STEAM:  SetAutoMode(AutoMode::OffWhileSteam); break;
+        case IDM_MODE_GAME:   SetAutoMode(AutoMode::OffOnlyInGame); break;
         case IDM_OUTPUT_X360:
             m_controller->SetEmulationMode(EmulationMode::Xbox360);
             SaveSettings();
@@ -755,7 +760,9 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ReconcileAutoMode();
             break;
         case IDM_CONFIGURE_PADDLES:
-            if (!m_steamRunning)
+            // Only a running game is a reason to refuse; Steam merely sitting
+            // idle no longer is, since OffOnlyInGame keeps working through it.
+            if (m_steamState != SteamState::InGame)
                 ShowPaddleConfigWindow();
             break;
         case IDM_CHECK_UPDATES:
@@ -767,6 +774,17 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         }
         return 0;
+
+    case WM_STEAMSTATE: {
+        const SteamState state = static_cast<SteamState>(wp);
+        // Close the config window when a game starts, not merely when Steam is
+        // open — the old poll closed it on any Steam launch.
+        if (state == SteamState::InGame && m_paddleConfigWindow)
+            m_paddleConfigWindow->Close();
+        ApplySteamState(state);
+        PublishWidgetState();
+        return 0;
+    }
 
     case WM_DEVICECHANGE:
         if (wp == DBT_DEVICEARRIVAL || wp == DBT_DEVICEREMOVECOMPLETE) {
@@ -819,13 +837,10 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ReconcileAutoMode();
             }
 
-            bool steamRunning = IsSteamRunning();
-            if (steamRunning != m_steamRunning) {
-                m_steamRunning = steamRunning;
-                if (m_steamRunning && m_paddleConfigWindow)
-                    m_paddleConfigWindow->Close();
-                ReconcileAutoMode();
-            }
+            // Steam state is no longer polled here — SteamWatcher owns it and
+            // delivers debounced transitions via WM_STEAMSTATE. This timer keeps
+            // its other two jobs: reconnect retries above and profile switching
+            // below.
 
             if (m_autoSwitchProfiles) {
                 const std::wstring detectedProfileId = GetDetectedGameProfileId();
@@ -846,6 +861,9 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_STEAM_POLL);
         KillTimer(hwnd, TIMER_SMAPI_WATCH);
+        // Joined before the window goes away so a queued WM_STEAMSTATE cannot
+        // arrive against a dead HWND.
+        m_steamWatcher.Stop();
         if (m_ipcServer)
             m_ipcServer->Stop();
         PostQuitMessage(0);
@@ -906,27 +924,6 @@ void TrayApp::ShowOutputBackendBalloon() {
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
-bool TrayApp::IsSteamRunning() const {
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE)
-        return false;
-
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    bool running = false;
-
-    if (Process32FirstW(snapshot, &entry)) {
-        do {
-            if (_wcsicmp(entry.szExeFile, L"steam.exe") == 0) {
-                running = true;
-                break;
-            }
-        } while (Process32NextW(snapshot, &entry));
-    }
-
-    CloseHandle(snapshot);
-    return running;
-}
 
 bool TrayApp::GetAutoSwitchProfiles() const {
     return m_autoSwitchProfiles;
@@ -996,22 +993,60 @@ void TrayApp::ApplyProfileById(const std::wstring& profileId, bool force) {
     PublishWidgetState();
 }
 
+// True when this app should own the controller in the current Steam state.
+bool TrayApp::WantControl(SteamState state) const {
+    switch (m_autoMode) {
+    case AutoMode::OffWhileSteam: return state == SteamState::NoSteam;
+    case AutoMode::OffOnlyInGame: return state != SteamState::InGame;
+    case AutoMode::Manual:        break;
+    }
+    return false;  // Manual: the tray toggle decides, not Steam state.
+}
+
+void TrayApp::SetAutoMode(AutoMode mode) {
+    if (m_autoMode == mode)
+        return;
+    m_autoMode = mode;
+    logging::Logf("[Auto] mode -> %d", static_cast<int>(m_autoMode));
+    SaveSettings();
+    if (mode != AutoMode::Manual)
+        ApplySteamState(m_steamWatcher.GetState());
+}
+
+void TrayApp::ApplySteamState(SteamState state) {
+    m_steamState   = state;
+    m_steamRunning = (state != SteamState::NoSteam);
+
+    if (!m_controller || m_autoMode == AutoMode::Manual)
+        return;
+
+    const bool want = WantControl(state);
+    logging::Logf("[Auto] steam state %d (0=none 1=idle 2=inGame) -> %s",
+                  static_cast<int>(state), want ? "take control" : "yield");
+
+    if (want) {
+        if (!m_controller->IsConnected())
+            m_controller->OnDeviceChange();
+        if (m_controller->IsConnected() &&
+            !m_controller->IsOutputBackendMissing() &&
+            !m_controller->IsGameModeActive())
+            m_controller->EnableGameMode();
+        return;
+    }
+
+    // Yield properly. DisableGameMode on its own only restores lizard mode and
+    // keeps our exclusive handle, which would leave Steam Input staring at a
+    // busy device — ReleaseDevices closes the handle too.
+    if (m_controller->IsConnected() || m_controller->IsGameModeActive())
+        m_controller->ReleaseDevices();
+}
+
+// Kept as the single "re-evaluate everything" entry point that the device,
+// power and profile paths already call.
 void TrayApp::ReconcileAutoMode() {
     if (!m_controller)
         return;
-
-    bool shouldAutoEnable = m_autoEnableSteamlessMode &&
-                            m_controller->IsConnected() &&
-                            !m_controller->IsOutputBackendMissing() &&
-                            !m_steamRunning;
-
-    if (shouldAutoEnable && !m_controller->IsGameModeActive()) {
-        m_controller->EnableGameMode();
-    } else if (m_steamRunning && m_controller->IsGameModeActive()) {
-        // Steam owns the controller via Steam Input while it is running, so
-        // step out of the way: disable steamless mode until Steam closes.
-        m_controller->DisableGameMode();
-    }
+    ApplySteamState(m_steamWatcher.GetState());
 }
 
 void TrayApp::ShowFirmwareChangedBalloon(const std::wstring& signature) {
@@ -1191,7 +1226,19 @@ void TrayApp::LoadSettings() {
     m_controller->SetTrackpadMouseEnabled(readBool(L"TrackpadMouse",   true));
     m_controller->SetBackButtonsEnabled  (readBool(L"BackButtons",     false));
     m_controller->SetUseLeftTrackpad     (readBool(L"UseLeftTrackpad", false));
-    m_autoEnableSteamlessMode            = readBool(L"AutoEnableSteamlessMode", true);
+    // Migrate the old boolean: it meant "yield whenever Steam runs", which is
+    // exactly OffWhileSteam. Anyone who had it off gets Manual. Once AutoMode
+    // has been written, it wins.
+    {
+        const bool legacyAutoEnable = readBool(L"AutoEnableSteamlessMode", true);
+        const DWORD stored = readDword(L"AutoMode",
+                                       legacyAutoEnable
+                                           ? static_cast<DWORD>(AutoMode::OffWhileSteam)
+                                           : static_cast<DWORD>(AutoMode::Manual));
+        m_autoMode = stored == static_cast<DWORD>(AutoMode::OffOnlyInGame) ? AutoMode::OffOnlyInGame
+                   : stored == static_cast<DWORD>(AutoMode::OffWhileSteam) ? AutoMode::OffWhileSteam
+                                                                          : AutoMode::Manual;
+    }
     m_autoSwitchProfiles                 = readBool(L"AutoSwitchProfiles", false);
     m_controller->SetEmulationMode(readBool(L"UseDs4Emulation", false)
         ? EmulationMode::DualShock4
@@ -1233,7 +1280,9 @@ void TrayApp::SaveSettings() {
     writeBool(L"TrackpadMouse",   m_controller->IsTrackpadMouseEnabled());
     writeBool(L"BackButtons",     m_controller->IsBackButtonsEnabled());
     writeBool(L"UseLeftTrackpad", m_controller->IsUseLeftTrackpad());
-    writeBool(L"AutoEnableSteamlessMode", m_autoEnableSteamlessMode);
+    writeDword(L"AutoMode", static_cast<DWORD>(m_autoMode));
+    // Kept in sync so downgrading to an older build still behaves sensibly.
+    writeBool(L"AutoEnableSteamlessMode", m_autoMode != AutoMode::Manual);
     writeBool(L"AutoSwitchProfiles", m_autoSwitchProfiles);
     writeBool(L"UseDs4Emulation",
               m_controller->GetEmulationMode() == EmulationMode::DualShock4);
@@ -1566,8 +1615,12 @@ void TrayApp::ShowContextMenu() {
     bool trackpadOn     = m_controller->IsTrackpadMouseEnabled();
     bool leftTrackpad   = m_controller->IsUseLeftTrackpad();
     bool startupOn      = IsStartupEnabled();
-    bool canEnableMode  = connected && !m_steamRunning;
-    bool canConfigure   = !m_steamRunning;
+    // In an auto mode, Steam blocks the toggle only when the mode says to yield.
+    // OffOnlyInGame therefore stays enabled while Steam merely sits idle, which
+    // is the whole point of it. Manual always lets the user try.
+    bool steamBlocks    = (m_autoMode != AutoMode::Manual) && !WantControl(m_steamState);
+    bool canEnableMode  = connected && !steamBlocks;
+    bool canConfigure   = m_steamState != SteamState::InGame;
     bool ds4Mode        = m_controller->GetEmulationMode() == EmulationMode::DualShock4;
 
     HMENU menu = CreatePopupMenu();
@@ -1578,8 +1631,15 @@ void TrayApp::ShowContextMenu() {
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
-    UINT autoEnableFlags = MF_STRING | (m_autoEnableSteamlessMode ? MF_CHECKED : MF_UNCHECKED);
-    AppendMenuW(menu, autoEnableFlags, IDM_AUTOENABLE, L"Auto-enable Steamless Mode");
+    HMENU modeMenu = CreatePopupMenu();
+    AppendMenuW(modeMenu, MF_STRING | (m_autoMode == AutoMode::Manual ? MF_CHECKED : MF_UNCHECKED),
+                IDM_MODE_MANUAL, L"Manual (tray toggle only)");
+    AppendMenuW(modeMenu, MF_STRING | (m_autoMode == AutoMode::OffWhileSteam ? MF_CHECKED : MF_UNCHECKED),
+                IDM_MODE_STEAM,  L"Off while Steam is running");
+    AppendMenuW(modeMenu, MF_STRING | (m_autoMode == AutoMode::OffOnlyInGame ? MF_CHECKED : MF_UNCHECKED),
+                IDM_MODE_GAME,   L"Off only while a game is running");
+    AppendMenuW(menu, MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(modeMenu),
+                L"Automatic control");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 

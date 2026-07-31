@@ -48,6 +48,12 @@ public:
     void EnableGameMode();
     void DisableGameMode();
 
+    // Disables game mode *and* closes the HID handle so another process can
+    // claim the controller. DisableGameMode alone is not enough to hand over:
+    // it restores lizard mode but keeps our exclusive handle, so Steam Input
+    // would still find the device busy. Safe to call when already disabled.
+    void ReleaseDevices();
+
     // Detach/reattach the virtual controller while keeping game mode active.
     // Used to let a game initialize its input stack before VIIPER appears.
     void DetachVirtual();

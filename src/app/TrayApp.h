@@ -2,6 +2,7 @@
 #include "PaddleConfig.h"
 #include "RemapBackend.h"
 #include "RemapIpcServer.h"
+#include "SteamWatcher.h"
 #include <Windows.h>
 #include <memory>
 #include <string>
@@ -9,6 +10,18 @@
 
 class ControllerManager;
 class PaddleConfigWindow;
+
+// Who decides when this app owns the physical controller.
+//
+// Ported from SteamlessController, which is the behaviour this fork exists to
+// pick up. Before this, the choice was a single "auto enable" checkbox that
+// yielded whenever steam.exe was running at all — so steamless mode could never
+// be active with Steam open, and emulation only worked with Steam shut down.
+enum class AutoMode {
+    Manual        = 0,  // tray toggle only
+    OffWhileSteam = 1,  // yield whenever steam.exe is running (the old behaviour)
+    OffOnlyInGame = 2,  // keep the controller while Steam idles, yield only for games
+};
 
 class TrayApp {
 public:
@@ -33,13 +46,17 @@ private:
     void ShowPaddleConfigWindow();
     bool GetAutoSwitchProfiles() const;
     void SetAutoSwitchProfiles(bool enabled);
-    bool IsSteamRunning() const;
     std::wstring GetDetectedGameProfileId() const;
     std::string HandleIpcRequest(const std::string& request);
     void PublishWidgetState();
     void ProcessWidgetBridge();
     void ApplyProfileById(const std::wstring& profileId, bool force = false);
     void ReconcileAutoMode();
+
+    // Auto-mode plumbing.
+    void SetAutoMode(AutoMode mode);
+    bool WantControl(SteamState state) const;
+    void ApplySteamState(SteamState state);
     bool IsStartupEnabled() const;
     void SetStartupEnabled(bool enabled);
     void CheckForUpdates(bool userInitiated);
@@ -54,9 +71,13 @@ private:
     std::unique_ptr<ControllerManager> m_controller;
     std::unique_ptr<PaddleConfigWindow> m_paddleConfigWindow;
     std::unique_ptr<RemapIpcServer>    m_ipcServer;
-    bool                               m_autoEnableSteamlessMode = true;
+    SteamWatcher                       m_steamWatcher;
+    AutoMode                           m_autoMode = AutoMode::OffWhileSteam;
     bool                               m_autoSwitchProfiles      = false;
     bool                               m_manualProfileOverride   = false;
+    // m_steamRunning is derived from m_steamState and kept only because the
+    // Game Bar widget payload and a few UI gates already report it.
+    SteamState                         m_steamState              = SteamState::NoSteam;
     bool                               m_steamRunning            = false;
     bool                               m_reportSignatureChecked  = false;
     ULONGLONG                          m_lastReconnectAttemptTick = 0;
@@ -73,12 +94,15 @@ private:
     static constexpr UINT IDM_BACKBUTTONS   = 1004;
     static constexpr UINT IDM_LEFT_TRACKPAD = 1005;
     static constexpr UINT IDM_STARTUP       = 1006;
-    static constexpr UINT IDM_AUTOENABLE    = 1007;
     static constexpr UINT IDM_OUTPUT_X360   = 1008;
     static constexpr UINT IDM_OUTPUT_DS4    = 1009;
     static constexpr UINT IDM_CHECK_UPDATES  = 1010;
+    static constexpr UINT IDM_MODE_MANUAL   = 1011;
+    static constexpr UINT IDM_MODE_STEAM    = 1012;
+    static constexpr UINT IDM_MODE_GAME     = 1013;
     static constexpr UINT IDM_CONFIGURE_PADDLES   = 1400;
     static constexpr UINT WM_TRAY          = WM_APP + 1;
+    static constexpr UINT WM_STEAMSTATE    = WM_APP + 2;
     static constexpr UINT TRAY_UID         = 1;
     static constexpr UINT TIMER_STEAM_POLL  = 1;
     static constexpr UINT STEAM_POLL_MS     = 1000;
