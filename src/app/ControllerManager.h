@@ -38,8 +38,20 @@ public:
     ControllerManager(const ControllerManager&) = delete;
     ControllerManager& operator=(const ControllerManager&) = delete;
 
-    // Called when Windows reports a device arrival or removal (WM_DEVICECHANGE).
-    void OnDeviceChange();
+    // Called when Windows reports a device arrival or removal (WM_DEVICECHANGE),
+    // and also from the reconnect retry timer.
+    //
+    // Pass deviceArrival=true only for a real WM_DEVICECHANGE arrival. It clears
+    // the liveness-probe cooldowns, so hardware that has just appeared or woken
+    // is probed immediately instead of waiting one out. The retry timer must pass
+    // false, or the cooldown never takes effect and every retry re-probes every
+    // silent dongle slot.
+    void OnDeviceChange(bool deviceArrival = false);
+
+    // Forgets liveness-probe cooldowns without attempting to open anything.
+    // For callers that know circumstances changed — a Steam state transition,
+    // resume from suspend — but must not themselves claim the device.
+    void ClearProbeCooldowns();
     void OnSuspend();
     void OnResume();
     void RecoverIfInputStalled();

@@ -196,13 +196,30 @@ bool SteamController::Open(const Candidate& candidate) {
 bool SteamController::Open() {
     logging::Logf("[SteamController] Open begin");
 
+    // A silent interface stays silent until something changes, so re-probing it
+    // every retry only burns the probe timeout. Skipping it for a while keeps the
+    // disconnected retry loop cheap; ClearProbeCooldowns() on device arrival is
+    // what guarantees a freshly woken controller is still found at once.
+    constexpr unsigned long long kProbeCooldownMs = 10000;
+    const unsigned long long now = GetTickCount64();
+
+    int skipped = 0;
     for (const auto& candidate : EnumerateCandidates()) {
-        if (Open(candidate))
+        const auto it = m_probeCooldownUntilMs.find(candidate.path);
+        if (it != m_probeCooldownUntilMs.end() && now < it->second) {
+            ++skipped;
+            continue;
+        }
+
+        if (Open(candidate)) {
+            m_probeCooldownUntilMs.clear();
             return true;
+        }
+        m_probeCooldownUntilMs[candidate.path] = now + kProbeCooldownMs;
     }
 
-    logging::Logf("[SteamController] Open failed (wired PID=%04X, dongle PID=%04X)",
-                  SC2026_PID, SC2026_DONGLE_PID);
+    logging::Logf("[SteamController] Open failed (wired PID=%04X, dongle PID=%04X, %d on cooldown)",
+                  SC2026_PID, SC2026_DONGLE_PID, skipped);
     return false;
 }
 

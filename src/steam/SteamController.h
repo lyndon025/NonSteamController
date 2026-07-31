@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 class SteamController {
@@ -159,7 +160,15 @@ public:
     bool Open(const Candidate& candidate);
 
     // Finds and opens the first live vendor HID interface. False if none.
+    //
+    // Interfaces that fail the liveness probe are put on a short cooldown and
+    // skipped until it expires. This matters because a dongle with no controller
+    // awake on it presents up to four silent slots, each costing a full probe
+    // timeout — retried on a 3s loop that is ~320ms of blocking work every time.
+    // Call ClearProbeCooldowns() on a device-arrival event so a controller that
+    // has just woken is picked up immediately rather than waiting one out.
     bool Open();
+    void ClearProbeCooldowns() { m_probeCooldownUntilMs.clear(); }
     void Close();
     bool IsOpen() const { return m_device.IsOpen(); }
 
@@ -200,6 +209,8 @@ private:
 
     HidDevice          m_device;
     std::wstring       m_devicePath;
+    // Interface path -> tick after which it may be probed again.
+    std::unordered_map<std::wstring, unsigned long long> m_probeCooldownUntilMs;
     std::thread        m_heartbeat;
     std::thread        m_rumbleThread;
     std::mutex         m_featureMutex;

@@ -65,7 +65,10 @@ ControllerManager::~ControllerManager() {
     Close(/*restoreLizard=*/true);
 }
 
-void ControllerManager::OnDeviceChange() {
+void ControllerManager::OnDeviceChange(bool deviceArrival) {
+    if (deviceArrival && g_ctrl)
+        g_ctrl->ClearProbeCooldowns();
+
     const std::uint64_t now = GetTickCount64();
     const bool shouldLog =
         m_connected != m_lastDeviceChangeLogConnected ||
@@ -95,10 +98,18 @@ void ControllerManager::OnSuspend() {
     Close(/*restoreLizard=*/false);
 }
 
+void ControllerManager::ClearProbeCooldowns() {
+    if (g_ctrl)
+        g_ctrl->ClearProbeCooldowns();
+}
+
 void ControllerManager::OnResume() {
     logging::Logf("[ControllerManager] OnResume");
     m_outputBackendMissing = false;
     Close(/*restoreLizard=*/false);
+    // USB topology can differ across suspend, so nothing learned before it is
+    // worth trusting.
+    ClearProbeCooldowns();
     TryOpen();
 }
 

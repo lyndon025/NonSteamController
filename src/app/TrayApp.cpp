@@ -781,6 +781,12 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // open — the old poll closed it on any Steam launch.
         if (state == SteamState::InGame && m_paddleConfigWindow)
             m_paddleConfigWindow->Close();
+        // A real transition means circumstances changed, so retry every interface
+        // rather than honouring a cooldown learned before it. Deliberately not
+        // done inside ApplySteamState: the retry timer calls that every tick and
+        // would clear the cooldowns continuously, defeating them.
+        if (m_controller)
+            m_controller->ClearProbeCooldowns();
         ApplySteamState(state);
         PublishWidgetState();
         return 0;
@@ -789,7 +795,9 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DEVICECHANGE:
         if (wp == DBT_DEVICEARRIVAL || wp == DBT_DEVICEREMOVECOMPLETE) {
             m_lastReconnectAttemptTick = GetTickCount64();
-            m_controller->OnDeviceChange();
+            // Real hardware event: clear probe cooldowns so a controller that
+            // just appeared is not skipped by one.
+            m_controller->OnDeviceChange(/*deviceArrival=*/true);
             ReconcileAutoMode();
         }
         return TRUE;
