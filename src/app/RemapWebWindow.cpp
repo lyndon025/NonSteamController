@@ -534,10 +534,21 @@ $('apply').onclick=()=>{
   send({cmd:'set', index:b.index, action:a});
 };
 
+// Reported to the host so it lands in the log file. Without this a scripting
+// error just shows an empty window, with nothing to go on.
+window.onerror=(msg,src,line,col)=>{
+  try{ send({cmd:'jserror', msg:msg+' @'+line+':'+col}); }catch(e){}
+  return false;
+};
+
 window.chrome.webview.addEventListener('message', e=>{
-  state=JSON.parse(e.data);
-  if(sel!==null && !cur()) sel=null;
-  render(); syncEditor();
+  try{
+    state=JSON.parse(e.data);
+    if(sel!==null && !cur()) sel=null;
+    render(); syncEditor();
+  }catch(err){
+    send({cmd:'jserror', msg:'render failed: '+err});
+  }
 });
 send({cmd:'ready'});
 </script></body></html>)HTML";
@@ -664,7 +675,11 @@ void RemapWebWindow::CreateWebViewAsync(HWND hwnd) {
                             if (SUCCEEDED(m_webview->get_Settings(&settings)) && settings) {
                                 settings->put_AreDefaultContextMenusEnabled(FALSE);
                                 settings->put_IsStatusBarEnabled(FALSE);
-                                settings->put_AreDevToolsEnabled(FALSE);
+                                // Left enabled deliberately. If the page fails to
+                                // render there is otherwise no way to find out
+                                // why: F12 is the only in-place diagnostic, and a
+                                // blank window with DevTools off is a dead end.
+                                settings->put_AreDevToolsEnabled(TRUE);
                             }
 
                             m_webview->add_WebMessageReceived(
@@ -764,7 +779,14 @@ void RemapWebWindow::OnWebMessage(const std::wstring& json) {
         return;
 
     if (cmd == L"ready") {
+        logging::Logf("[RemapWeb] page ready");
         PostState();
+        return;
+    }
+    if (cmd == L"jserror") {
+        std::wstring msg;
+        JsonStringField(json, L"msg", msg);
+        logging::Logf("[RemapWeb] SCRIPT ERROR: %s", logging::Narrow(msg).c_str());
         return;
     }
     if (cmd == L"close") {
