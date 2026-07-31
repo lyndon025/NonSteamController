@@ -1,6 +1,7 @@
 #include "RemapWebWindow.h"
 #include "PaddleConfig.h"
 #include "logging/Log.h"
+#include "resource.h"
 
 #include <shlwapi.h>
 #include <string>
@@ -17,35 +18,86 @@ struct ButtonMeta {
     int          index;
     const wchar_t* name;
     const wchar_t* group;
+    // Position on the controller artwork, as a percentage of the image box.
+    // Derived from the Win32 editor's hotspot table, which placed the image at
+    // Rect(20, 32, 560, 379) — these are those anchors normalised, so the two
+    // editors mark the same physical buttons.
+    double xPct;
+    double yPct;
 };
 
 // Order defines display order. Indices match GetButtonAction() in
 // VirtualController.h — the whole point of this editor over the old one is that
 // all 22 are reachable, not just the five paddles.
 constexpr ButtonMeta kButtons[] = {
-    {  0, L"L4",          L"Back paddles" },
-    {  1, L"L5",          L"Back paddles" },
-    {  2, L"R4",          L"Back paddles" },
-    {  3, L"R5",          L"Back paddles" },
-    {  4, L"QAM",         L"Back paddles" },
-    {  5, L"A",           L"Face buttons" },
-    {  6, L"B",           L"Face buttons" },
-    {  7, L"X",           L"Face buttons" },
-    {  8, L"Y",           L"Face buttons" },
-    {  9, L"LB",          L"Bumpers" },
-    { 10, L"RB",          L"Bumpers" },
-    { 20, L"L2",          L"Triggers" },
-    { 21, L"R2",          L"Triggers" },
-    { 16, L"D-Pad Up",    L"D-Pad" },
-    { 17, L"D-Pad Down",  L"D-Pad" },
-    { 18, L"D-Pad Left",  L"D-Pad" },
-    { 19, L"D-Pad Right", L"D-Pad" },
-    { 14, L"L3",          L"Sticks" },
-    { 15, L"R3",          L"Sticks" },
-    { 11, L"View",        L"System" },
-    { 12, L"Menu",        L"System" },
-    { 13, L"Guide",       L"System" },
+    {  0, L"L4",          L"Back paddles", 30.7, 57.8 },
+    {  1, L"L5",          L"Back paddles", 28.6, 72.3 },
+    {  2, L"R4",          L"Back paddles", 69.6, 57.8 },
+    {  3, L"R5",          L"Back paddles", 71.6, 72.3 },
+    {  4, L"QAM",         L"Back paddles", 49.1, 70.7 },
+    {  5, L"A",           L"Face buttons", 84.5, 43.5 },
+    {  6, L"B",           L"Face buttons", 89.6, 36.4 },
+    {  7, L"X",           L"Face buttons", 79.3, 36.4 },
+    {  8, L"Y",           L"Face buttons", 84.5, 29.3 },
+    {  9, L"LB",          L"Bumpers",      11.8, 10.5 },
+    { 10, L"RB",          L"Bumpers",      84.6, 10.5 },
+    { 20, L"L2",          L"Triggers",     11.6,  3.5 },
+    { 21, L"R2",          L"Triggers",     84.6,  3.5 },
+    { 16, L"D-Pad Up",    L"D-Pad",        21.1, 27.4 },
+    { 17, L"D-Pad Down",  L"D-Pad",        21.1, 42.5 },
+    { 18, L"D-Pad Left",  L"D-Pad",        15.7, 35.1 },
+    { 19, L"D-Pad Right", L"D-Pad",        27.1, 35.1 },
+    { 14, L"L3",          L"Sticks",       32.7, 45.1 },
+    { 15, L"R3",          L"Sticks",       63.8, 45.1 },
+    { 11, L"View",        L"System",       39.6, 40.6 },
+    { 12, L"Menu",        L"System",       56.5, 40.6 },
+    { 13, L"Guide",       L"System",       48.0, 46.7 },
 };
+
+// The controller artwork is already embedded as RCDATA for the Win32 editor.
+// WebView2 has no access to module resources, so it is read out and inlined as a
+// data: URI. Cached because it is ~240 KB of base64 and never changes.
+std::string ControllerImageDataUri() {
+    static std::string cached;
+    static bool tried = false;
+    if (tried) return cached;
+    tried = true;
+
+    HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_CONTROLLER_IMAGE),
+                              reinterpret_cast<LPCWSTR>(RT_RCDATA));
+    if (!res) {
+        logging::Logf("[RemapWeb] controller image resource not found");
+        return cached;
+    }
+    HGLOBAL handle = LoadResource(nullptr, res);
+    const DWORD size = SizeofResource(nullptr, res);
+    const void* data = handle ? LockResource(handle) : nullptr;
+    if (!data || size == 0) {
+        logging::Logf("[RemapWeb] controller image resource empty");
+        return cached;
+    }
+
+    static const char kB64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    std::string b64;
+    b64.reserve(((static_cast<size_t>(size) + 2) / 3) * 4);
+    for (DWORD i = 0; i < size; i += 3) {
+        const unsigned c0 = bytes[i];
+        const unsigned c1 = (i + 1 < size) ? bytes[i + 1] : 0u;
+        const unsigned c2 = (i + 2 < size) ? bytes[i + 2] : 0u;
+        const unsigned triple = (c0 << 16) | (c1 << 8) | c2;
+        b64 += kB64[(triple >> 18) & 0x3F];
+        b64 += kB64[(triple >> 12) & 0x3F];
+        b64 += (i + 1 < size) ? kB64[(triple >> 6) & 0x3F] : '=';
+        b64 += (i + 2 < size) ? kB64[triple & 0x3F]        : '=';
+    }
+
+    cached = "data:image/png;base64," + b64;
+    logging::Logf("[RemapWeb] controller image inlined (%lu bytes -> %zu base64)",
+                  size, b64.size());
+    return cached;
+}
 
 // Menu-mapping fallback for the five paddles, used by Describe when an action is
 // UseMenuMapping. Standard buttons pass through to themselves.
@@ -58,6 +110,21 @@ PaddleMapping FallbackFor(int index, const PaddleMappings& m) {
     case 4: return m.qam;
     default: return PaddleMapping::None;
     }
+}
+
+// The page literal is UTF-8 (the target compiles with /utf-8) and
+// NavigateToString wants UTF-16. Converting properly matters: widening
+// byte-by-byte would split every multi-byte sequence into separate garbage code
+// units, so any non-ASCII in the markup would render as mojibake.
+std::wstring Utf8ToWide(const std::string& in) {
+    if (in.empty()) return {};
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, in.data(),
+                                           static_cast<int>(in.size()), nullptr, 0);
+    if (needed <= 0) return {};
+    std::wstring out(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, in.data(), static_cast<int>(in.size()),
+                        out.data(), needed);
+    return out;
 }
 
 std::wstring JsonEscape(const std::wstring& in) {
@@ -160,7 +227,31 @@ header{
 }
 header h1{margin:0; font-size:17px; font-weight:600; letter-spacing:.2px}
 header .profile{color:var(--accent); font-size:13px}
-main{flex:1 1 auto; overflow-y:auto; padding:16px 20px 8px}
+.bar{
+  flex:0 0 auto; padding:10px 20px; display:flex; align-items:center; gap:10px;
+  background:rgba(255,255,255,.03); border-bottom:1px solid rgba(255,255,255,.05);
+}
+.bar select{width:auto; min-width:170px}
+main{flex:1 1 auto; overflow-y:auto; padding:16px 20px 8px; display:flex; gap:20px; align-items:flex-start}
+.left{flex:0 0 440px; position:sticky; top:0}
+.right{flex:1 1 auto; min-width:0}
+.pad{position:relative; width:100%; border-radius:10px; background:#0e141b; padding:6px}
+.pad img{display:block; width:100%; height:auto; opacity:.92}
+.dot{
+  position:absolute; transform:translate(-50%,-50%);
+  width:22px; height:22px; border-radius:50%; cursor:pointer;
+  background:rgba(191,227,255,.22); border:2px solid var(--accent);
+  display:flex; align-items:center; justify-content:center;
+  font-size:9px; font-weight:700; color:var(--accent); line-height:1;
+}
+.dot:hover{background:rgba(102,192,244,.45); color:#fff}
+.dot.bound{background:rgba(102,192,244,.30)}
+.dot.sel{
+  background:linear-gradient(135deg,var(--accent-deep),#0a4a78);
+  border-color:#bfe3ff; color:#fff; width:26px; height:26px;
+  box-shadow:0 0 0 4px rgba(102,192,244,.22);
+}
+.padhint{margin-top:8px; color:var(--text-faint); font-size:12px; text-align:center}
 .group{margin-bottom:18px}
 .group>h2{
   margin:0 0 8px; font-size:11px; letter-spacing:1.4px; text-transform:uppercase;
@@ -213,33 +304,44 @@ button.primary:hover{filter:brightness(1.12)}
   <h1>Remap Buttons</h1>
   <span class="profile" id="prof"></span>
 </header>
+<div class="bar">
+  <label for="prof2">Profile</label>
+  <select id="prof2"></select>
+  <span class="chk"><input type="checkbox" id="auto"><label for="auto">Auto-switch when a game launches</label></span>
+</div>
 <main>
-  <div id="ed" class="editor" style="display:none">
-    <label for="type">Action</label>
-    <select id="type">
-      <option value="MENU">Passthrough (default)</option>
-      <option value="NONE">Unmapped</option>
-      <option value="GAMEPAD">Gamepad button</option>
-      <option value="KEY">Keyboard shortcut</option>
-    </select>
-    <label for="pad" id="padL">Target</label>
-    <select id="pad">
-      <option>A</option><option>B</option><option>X</option><option>Y</option>
-      <option>LB</option><option>RB</option><option>L3</option><option>R3</option>
-      <option>View</option><option>Menu</option><option>Guide</option>
-      <option>DPadUp</option><option>DPadDown</option><option>DPadLeft</option><option>DPadRight</option>
-    </select>
-    <label for="key" id="keyL">Keys</label>
-    <input type="text" id="key" placeholder="CTRL+SHIFT+F1">
-    <div class="full chk"><input type="checkbox" id="rapid"><label for="rapid">Rapid fire while held</label></div>
-    <div class="full"><button class="primary" id="apply">Apply to <span id="applyName"></span></button></div>
+  <div class="left">
+    <div class="pad" id="pad"><img id="padimg" alt=""></div>
+    <div class="padhint">Click a marker to rebind that button.</div>
   </div>
-  <div id="groups"></div>
+  <div class="right">
+    <div id="ed" class="editor" style="display:none">
+      <label for="type">Action</label>
+      <select id="type">
+        <option value="MENU">Passthrough (default)</option>
+        <option value="NONE">Unmapped</option>
+        <option value="GAMEPAD">Gamepad button</option>
+        <option value="KEY">Keyboard shortcut</option>
+      </select>
+      <label for="pads" id="padL">Target</label>
+      <select id="pads">
+        <option>A</option><option>B</option><option>X</option><option>Y</option>
+        <option>LB</option><option>RB</option><option>L3</option><option>R3</option>
+        <option>View</option><option>Menu</option><option>Guide</option>
+        <option>DPadUp</option><option>DPadDown</option><option>DPadLeft</option><option>DPadRight</option>
+      </select>
+      <label for="key" id="keyL">Keys</label>
+      <input type="text" id="key" readonly placeholder="Click, then press the keys">
+      <div class="full chk"><input type="checkbox" id="rapid"><label for="rapid">Rapid fire while held</label></div>
+      <div class="full"><button class="primary" id="apply">Apply to <span id="applyName"></span></button></div>
+    </div>
+    <div id="groups"></div>
+  </div>
 </main>
 <footer>
   <span class="hint" id="hint">Select a button to rebind it.</span>
   <span class="spacer"></span>
-  <button id="adv">Macros &amp; profiles…</button>
+  <button id="adv">Macros &amp; profiles...</button>
   <button id="close">Close</button>
 </footer>
 <script>
@@ -253,8 +355,45 @@ function classify(d){
   return 'bound';
 }
 
+// Arrows for the D-Pad; truncating the names gave "Dow" and "Lef". These are
+// literal UTF-8 in the C++ source, which is safe because the page is converted
+// with MultiByteToWideChar rather than widened byte-by-byte (see Utf8ToWide).
+const SHORT={'D-Pad Up':'↑','D-Pad Down':'↓',
+             'D-Pad Left':'←','D-Pad Right':'→'};
+
+function renderPad(){
+  const host=$('pad');
+  host.querySelectorAll('.dot').forEach(d=>d.remove());
+  for(const b of state.buttons){
+    if(b.x===undefined) continue;
+    const d=document.createElement('div');
+    d.className='dot '+(classify(b.desc)==='bound'?'bound ':'')+(sel===b.index?'sel':'');
+    d.style.left=b.x+'%'; d.style.top=b.y+'%';
+    d.title=b.name+': '+b.desc;
+    d.textContent=SHORT[b.name]||b.name;
+    d.onclick=()=>{sel=b.index; syncEditor(); render();};
+    host.appendChild(d);
+  }
+}
+
+function renderProfiles(){
+  const s=$('prof2');
+  if(s.dataset.sig === (state.profiles||[]).join('|')+'#'+state.profile) return;
+  s.dataset.sig=(state.profiles||[]).join('|')+'#'+state.profile;
+  s.innerHTML='';
+  for(const p of (state.profiles||[])){
+    const o=document.createElement('option');
+    o.value=p; o.textContent=p;
+    if(p===state.profile) o.selected=true;
+    s.appendChild(o);
+  }
+}
+
 function render(){
   $('prof').textContent = state.profile ? 'profile: '+state.profile : '';
+  $('auto').checked = !!state.autoSwitch;
+  renderProfiles();
+  renderPad();
   const seen=[], host=$('groups');
   host.innerHTML='';
   for(const b of state.buttons){
@@ -289,22 +428,57 @@ function syncEditor(){
 function typeChanged(){
   const t=$('type').value;
   const padOn = t==='GAMEPAD', keyOn = t==='KEY';
-  $('pad').style.display=padOn?'':'none';   $('padL').style.display=padOn?'':'none';
+  $('pads').style.display=padOn?'':'none';  $('padL').style.display=padOn?'':'none';
   $('key').style.display=keyOn?'':'none';   $('keyL').style.display=keyOn?'':'none';
   $('rapid').disabled = !(padOn||keyOn);
 }
 
+// Live key capture. Typing "CTRL+SHIFT+F1" by hand was the crudest part of the
+// old editor; here the field records what is actually pressed. Tokens match what
+// PaddleConfig's parser accepts.
+const KEYMAP={
+  ' ':'SPACE', 'Enter':'ENTER', 'Tab':'TAB', 'Escape':'ESC', 'Backspace':'BACKSPACE',
+  'Delete':'DELETE', 'Insert':'INSERT', 'Home':'HOME', 'End':'END',
+  'PageUp':'PAGEUP', 'PageDown':'PAGEDOWN',
+  'ArrowUp':'UP', 'ArrowDown':'DOWN', 'ArrowLeft':'LEFT', 'ArrowRight':'RIGHT'
+};
+function tokenFor(e){
+  const k=e.key;
+  if(KEYMAP[k]) return KEYMAP[k];
+  if(/^F\d{1,2}$/.test(k)) return k.toUpperCase();
+  if(k.length===1){
+    const u=k.toUpperCase();
+    if((u>='A'&&u<='Z')||(u>='0'&&u<='9')) return u;
+  }
+  return null;
+}
+$('key').onkeydown=e=>{
+  e.preventDefault();
+  const mods=[];
+  if(e.ctrlKey)  mods.push('CTRL');
+  if(e.shiftKey) mods.push('SHIFT');
+  if(e.altKey)   mods.push('ALT');
+  if(e.metaKey)  mods.push('WIN');
+  const t=tokenFor(e);
+  // Modifier-only presses show progress but are not a complete chord.
+  $('key').value = t ? mods.concat([t]).join('+') : mods.join('+');
+  $('hint').textContent = t ? 'Captured '+$('key').value+'.' : 'Now press the main key.';
+};
+$('key').onfocus=()=>{ $('hint').textContent='Press the keys you want bound.'; };
+
 $('type').onchange=typeChanged;
 $('close').onclick=()=>send({cmd:'close'});
 $('adv').onclick=()=>send({cmd:'advanced'});
+$('prof2').onchange=()=>send({cmd:'profile', profile:$('prof2').value});
+$('auto').onchange=()=>send({cmd:'autoswitch', on:$('auto').checked?1:0});
 $('apply').onclick=()=>{
   const b=cur(); if(!b) return;
   const t=$('type').value;
   let a=t;
-  if(t==='GAMEPAD') a='GAMEPAD:'+$('pad').value;
+  if(t==='GAMEPAD') a='GAMEPAD:'+$('pads').value;
   else if(t==='KEY'){
     const k=$('key').value.trim();
-    if(!k){ $('hint').textContent='Type a shortcut first, e.g. CTRL+C.'; return; }
+    if(!k || /\+$/.test(k)){ $('hint').textContent='Click the Keys box and press a shortcut first.'; return; }
     a='KEY:'+k;
   }
   if((t==='GAMEPAD'||t==='KEY') && $('rapid').checked) a+='|RAPID';
@@ -337,12 +511,9 @@ bool RemapWebWindow::IsRuntimeAvailable() {
     return ok;
 }
 
-bool RemapWebWindow::Open(HINSTANCE hInst, const std::wstring& profileId,
-                          QueryFn query, ApplyFn apply, OpenAdvancedFn openAdvanced) {
-    m_profileId    = profileId;
-    m_query        = std::move(query);
-    m_apply        = std::move(apply);
-    m_openAdvanced = std::move(openAdvanced);
+bool RemapWebWindow::Open(HINSTANCE hInst, const std::wstring& profileId, Callbacks cb) {
+    m_profileId = profileId;
+    m_cb        = std::move(cb);
 
     if (m_hwnd) {
         BringToFront();
@@ -461,7 +632,19 @@ void RemapWebWindow::CreateWebViewAsync(HWND hwnd) {
                                 nullptr);
 
                             ResizeWebView();
-                            const std::wstring html(kHtml, kHtml + strlen(kHtml));
+
+                            // Inline the controller artwork before navigating.
+                            // Substituted here rather than pushed as state so the
+                            // ~240 KB data URI crosses the bridge once, not on
+                            // every refresh.
+                            std::string page = kHtml;
+                            const std::string uri = ControllerImageDataUri();
+                            const std::string token = "id=\"padimg\" alt=\"\"";
+                            const size_t at = page.find(token);
+                            if (at != std::string::npos && !uri.empty())
+                                page.insert(at + token.size(), " src=\"" + uri + "\"");
+
+                            const std::wstring html = Utf8ToWide(page);
                             m_webview->NavigateToString(html.c_str());
                             return S_OK;
                         }).Get());
@@ -473,12 +656,28 @@ void RemapWebWindow::CreateWebViewAsync(HWND hwnd) {
 }
 
 void RemapWebWindow::PostState() {
-    if (!m_webview || !m_query) return;
+    if (!m_webview || !m_cb.query) return;
 
-    const PaddleActionBindings bindings = m_query();
+    const PaddleActionBindings bindings = m_cb.query();
     PaddleMappings mappings{};  // menu fallbacks are not edited here
 
-    std::wstring json = L"{\"profile\":\"" + JsonEscape(m_profileId) + L"\",\"buttons\":[";
+    std::wstring json = L"{\"profile\":\"" + JsonEscape(m_profileId) + L"\"";
+
+    json += L",\"autoSwitch\":";
+    json += (m_cb.autoSwitchGet && m_cb.autoSwitchGet()) ? L"true" : L"false";
+
+    json += L",\"profiles\":[";
+    if (m_cb.profiles) {
+        bool firstProfile = true;
+        for (const std::wstring& id : m_cb.profiles()) {
+            if (!firstProfile) json += L',';
+            firstProfile = false;
+            json += L'"' + JsonEscape(id) + L'"';
+        }
+    }
+    json += L"]";
+
+    json += L",\"buttons\":[";
     bool first = true;
     for (const ButtonMeta& meta : kButtons) {
         const PaddleAction* action = GetButtonAction(bindings, meta.index);
@@ -490,6 +689,8 @@ void RemapWebWindow::PostState() {
         json += L"{\"index\":" + std::to_wstring(meta.index) +
                 L",\"name\":\"" + JsonEscape(meta.name) + L"\"" +
                 L",\"group\":\"" + JsonEscape(meta.group) + L"\"" +
+                L",\"x\":" + std::to_wstring(meta.xPct) +
+                L",\"y\":" + std::to_wstring(meta.yPct) +
                 L",\"desc\":\"" + JsonEscape(desc) + L"\"}";
     }
     json += L"]}";
@@ -511,7 +712,7 @@ void RemapWebWindow::OnWebMessage(const std::wstring& json) {
         return;
     }
     if (cmd == L"advanced") {
-        if (m_openAdvanced) m_openAdvanced();
+        if (m_cb.openAdvanced) m_cb.openAdvanced();
         return;
     }
     if (cmd == L"set") {
@@ -520,8 +721,25 @@ void RemapWebWindow::OnWebMessage(const std::wstring& json) {
         if (!JsonIntField(json, L"index", index) ||
             !JsonStringField(json, L"action", action))
             return;
-        if (m_apply) m_apply(index, action);
+        if (m_cb.apply) m_cb.apply(index, action);
         PostState();  // echo back what actually took effect
+        return;
+    }
+    if (cmd == L"profile") {
+        std::wstring id;
+        if (!JsonStringField(json, L"profile", id)) return;
+        if (m_cb.switchProfile) {
+            m_cb.switchProfile(id);
+            m_profileId = id;
+        }
+        PostState();
+        return;
+    }
+    if (cmd == L"autoswitch") {
+        int on = 0;
+        if (!JsonIntField(json, L"on", on)) return;
+        if (m_cb.autoSwitchSet) m_cb.autoSwitchSet(on != 0);
+        PostState();
         return;
     }
 }

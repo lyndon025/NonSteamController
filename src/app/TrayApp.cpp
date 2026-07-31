@@ -1348,26 +1348,40 @@ void TrayApp::ShowRemapEditor() {
     if (!m_remapWebWindow)
         m_remapWebWindow = std::make_unique<RemapWebWindow>();
 
+    RemapWebWindow::Callbacks cb;
+    cb.query = [this]() { return m_controller->GetPaddleActions(); };
+    cb.apply = [this](int index, const std::wstring& actionString) {
+        PaddleAction action{};
+        if (!PaddleConfig::ParseActionString(actionString, action)) {
+            logging::Logf("[Remap] rejected action string for button %d", index);
+            return;
+        }
+        PaddleActionBindings bindings = m_controller->GetPaddleActions();
+        if (PaddleAction* slot = GetButtonAction(bindings, index)) {
+            *slot = std::move(action);
+            m_controller->SetPaddleActions(bindings);
+            m_remapBackend.SaveActiveProfile(m_controller->GetPaddleMappings(), bindings);
+            SaveSettings();
+            PublishWidgetState();
+        }
+    };
+    cb.openAdvanced = [this]() { ShowPaddleConfigWindow(); };
+    cb.profiles     = [this]() {
+        std::vector<std::wstring> ids;
+        ids.push_back(L"default");
+        for (const std::wstring& game : m_remapBackend.GetInstalledGames())
+            ids.push_back(PaddleConfig::NormalizeProfileId(game));
+        return ids;
+    };
+    cb.switchProfile = [this](const std::wstring& profileId) {
+        m_manualProfileOverride = true;
+        ApplyProfileById(profileId, /*force=*/true);
+    };
+    cb.autoSwitchGet = [this]() { return GetAutoSwitchProfiles(); };
+    cb.autoSwitchSet = [this](bool on) { SetAutoSwitchProfiles(on); };
+
     const bool opened = m_remapWebWindow->Open(
-        m_hInstance,
-        m_remapBackend.GetActiveProfileId(),
-        [this]() { return m_controller->GetPaddleActions(); },
-        [this](int index, const std::wstring& actionString) {
-            PaddleAction action{};
-            if (!PaddleConfig::ParseActionString(actionString, action)) {
-                logging::Logf("[Remap] rejected action string for button %d", index);
-                return;
-            }
-            PaddleActionBindings bindings = m_controller->GetPaddleActions();
-            if (PaddleAction* slot = GetButtonAction(bindings, index)) {
-                *slot = std::move(action);
-                m_controller->SetPaddleActions(bindings);
-                m_remapBackend.SaveActiveProfile(m_controller->GetPaddleMappings(), bindings);
-                SaveSettings();
-                PublishWidgetState();
-            }
-        },
-        [this]() { ShowPaddleConfigWindow(); });
+        m_hInstance, m_remapBackend.GetActiveProfileId(), std::move(cb));
 
     if (!opened) {
         logging::Logf("[Remap] web editor failed to open; using the Win32 editor");

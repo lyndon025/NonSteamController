@@ -34,6 +34,22 @@ public:
     using QueryFn = std::function<PaddleActionBindings()>;
     // Invoked when the user asks for the surfaces this editor does not host yet.
     using OpenAdvancedFn = std::function<void()>;
+    // Profile list for the selector, and switching to one.
+    using ProfilesFn      = std::function<std::vector<std::wstring>()>;
+    using SwitchProfileFn = std::function<void(const std::wstring& profileId)>;
+    // Auto-switch-profiles toggle state and setter.
+    using AutoSwitchGetFn = std::function<bool()>;
+    using AutoSwitchSetFn = std::function<void(bool)>;
+
+    struct Callbacks {
+        QueryFn         query;
+        ApplyFn         apply;
+        OpenAdvancedFn  openAdvanced;
+        ProfilesFn      profiles;
+        SwitchProfileFn switchProfile;
+        AutoSwitchGetFn autoSwitchGet;
+        AutoSwitchSetFn autoSwitchSet;
+    };
 
     RemapWebWindow() = default;
     ~RemapWebWindow();
@@ -46,8 +62,7 @@ public:
 
     // Opens, or re-focuses if already open. Returns false if the window could
     // not be created, in which case the caller should use the fallback editor.
-    bool Open(HINSTANCE hInst, const std::wstring& profileId,
-              QueryFn query, ApplyFn apply, OpenAdvancedFn openAdvanced);
+    bool Open(HINSTANCE hInst, const std::wstring& profileId, Callbacks cb);
 
     void Close();
     void BringToFront() const;
@@ -68,9 +83,7 @@ private:
     HWND       m_hwnd  = nullptr;
     HINSTANCE  m_hInst = nullptr;
     std::wstring m_profileId;
-    QueryFn        m_query;
-    ApplyFn        m_apply;
-    OpenAdvancedFn m_openAdvanced;
+    Callbacks    m_cb;
 
     Microsoft::WRL::ComPtr<ICoreWebView2Environment> m_env;
     Microsoft::WRL::ComPtr<ICoreWebView2Controller>  m_controller;
