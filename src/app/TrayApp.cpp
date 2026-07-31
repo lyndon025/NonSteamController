@@ -32,7 +32,7 @@ static constexpr wchar_t OLD_APP_NAME[]  = L"SteamlessController";
 static constexpr wchar_t REG_LAST_PROFILE[] = L"LastActiveProfileId";
 static constexpr wchar_t REG_MANUAL_OVERRIDE[] = L"ManualProfileOverride";
 static constexpr wchar_t REG_CONTROLLER_REPORT_SIGNATURE[] = L"ControllerReportSignature";
-static constexpr wchar_t UPDATE_URL[] = L"https://github.com/CommonMugger/Steam-Controller-Remapper/releases/latest";
+static constexpr wchar_t UPDATE_URL[] = L"https://github.com/lyndon025/NonSteamController/releases/latest";
 static constexpr char UPDATE_ASSET_SUFFIX[] = "-Setup.exe";
 #define SCR_WIDEN2(x) L##x
 #define SCR_WIDEN(x) SCR_WIDEN2(x)
@@ -1102,7 +1102,7 @@ void TrayApp::CheckForUpdates(bool userInitiated) {
     std::thread([this, userInitiated]() {
         const std::string json = HttpGetUtf8(L"api.github.com",
                                              INTERNET_DEFAULT_HTTPS_PORT,
-                                             L"/repos/CommonMugger/Steam-Controller-Remapper/releases/latest",
+                                             L"/repos/lyndon025/NonSteamController/releases/latest",
                                              true);
         if (json.empty()) {
             if (userInitiated) {
