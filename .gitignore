@@ -1,5 +1,7 @@
-# Build output
+# Build output (build/, build-ninja/, build-release/, ...)
 build/
+build*/
+out/
 
 # Loose binaries committed by mistake
 *.exe
