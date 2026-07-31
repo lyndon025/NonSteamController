@@ -212,6 +212,10 @@ const char* kHtml = R"HTML(<!DOCTYPE html>
   --accent:#66c0f4; --accent-deep:#1a9fff;
   --text:#ffffff; --text-dim:#c7d5e0; --text-mute:#8f98a0; --text-faint:#5c6b78;
   --green:#5ba32b; --red:#c0392b;
+  /* Tells the engine to render native widgets dark. Without it a <select>'s
+     drop-down list keeps its OS-white background while the options inherit the
+     page's white text, so every unhighlighted option is invisible. */
+  color-scheme: dark;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
@@ -237,18 +241,21 @@ main{flex:1 1 auto; overflow-y:auto; padding:16px 20px 8px; display:flex; gap:20
 .right{flex:1 1 auto; min-width:0}
 .pad{position:relative; width:100%; border-radius:10px; background:#0e141b; padding:6px}
 .pad img{display:block; width:100%; height:auto; opacity:.92}
+/* Pills, not fixed circles: labels like "View", "Menu" and "Guide" overflowed a
+   22px circle. Auto width with a min-width keeps short labels round. */
 .dot{
   position:absolute; transform:translate(-50%,-50%);
-  width:22px; height:22px; border-radius:50%; cursor:pointer;
-  background:rgba(191,227,255,.22); border:2px solid var(--accent);
+  min-width:22px; height:20px; padding:0 6px; box-sizing:border-box;
+  border-radius:10px; cursor:pointer; white-space:nowrap;
+  background:rgba(14,20,27,.72); border:2px solid var(--accent);
   display:flex; align-items:center; justify-content:center;
-  font-size:9px; font-weight:700; color:var(--accent); line-height:1;
+  font-size:9.5px; font-weight:700; color:var(--accent); line-height:1;
 }
-.dot:hover{background:rgba(102,192,244,.45); color:#fff}
-.dot.bound{background:rgba(102,192,244,.30)}
+.dot:hover{background:rgba(102,192,244,.55); color:#fff; z-index:3}
+.dot.bound{background:rgba(102,192,244,.32); color:#fff}
 .dot.sel{
   background:linear-gradient(135deg,var(--accent-deep),#0a4a78);
-  border-color:#bfe3ff; color:#fff; width:26px; height:26px;
+  border-color:#bfe3ff; color:#fff; z-index:2;
   box-shadow:0 0 0 4px rgba(102,192,244,.22);
 }
 .padhint{margin-top:8px; color:var(--text-faint); font-size:12px; text-align:center}
@@ -285,15 +292,26 @@ footer{
 }
 .editor{
   background:#1b2a3a; border-radius:10px; padding:14px; margin-bottom:14px;
-  display:grid; grid-template-columns:auto 1fr; gap:10px 12px; align-items:center;
+  display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px 12px; align-items:center;
 }
 .editor .full{grid-column:1 / -1}
+.editor h3{
+  grid-column:1 / -1; margin:0 0 2px; font-size:13px; font-weight:600;
+  color:var(--text-dim);
+}
+.editor h3 b{color:var(--accent)}
+.btnrow{display:flex; align-items:center; gap:10px}
+.applied{color:var(--green); font-size:12.5px; min-height:1em}
 label{color:var(--text-mute); font-size:12.5px}
 select,input[type=text]{
   width:100%; padding:7px 9px; border-radius:6px; color:var(--text);
   background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.10);
   font-family:inherit; font-size:13px;
 }
+/* Explicit, opaque colours for the drop-down list. The translucent
+   rgba() background above does not apply inside the popup, and inheriting the
+   page's white text there is what made unhighlighted options unreadable. */
+select option{background:#1b2a3a; color:#fff}
 select:focus,input:focus{outline:none; border-color:var(--accent)}
 button{
   padding:8px 16px; border-radius:6px; border:1px solid rgba(255,255,255,.12);
@@ -326,6 +344,7 @@ button.primary:hover{filter:brightness(1.12)}
   </div>
   <div class="right">
     <div id="ed" class="editor" style="display:none">
+      <h3>Editing <b id="edName"></b> &mdash; currently <b id="edNow"></b></h3>
       <label for="type">Action</label>
       <select id="type">
         <option value="MENU">Passthrough (default)</option>
@@ -343,8 +362,9 @@ button.primary:hover{filter:brightness(1.12)}
       <label for="key" id="keyL">Keys</label>
       <input type="text" id="key" readonly placeholder="Click, then press the keys">
       <div class="full chk"><input type="checkbox" id="rapid"><label for="rapid">Rapid fire while held</label></div>
-      <div class="full">
-        <button class="primary" id="apply">Apply to <span id="applyName"></span></button>
+      <div class="full btnrow">
+        <span class="applied" id="applied"></span>
+        <span class="spacer"></span>
         <button id="rec">Record macro…</button>
       </div>
     </div>
@@ -462,7 +482,8 @@ function syncEditor(){
   const b=cur();
   $('ed').style.display = b ? 'grid' : 'none';
   if(!b) return;
-  $('applyName').textContent=b.name;
+  $('edName').textContent=b.name;
+  $('edNow').textContent=b.desc;
   $('hint').textContent='Editing '+b.name+'.';
   typeChanged();
 }
@@ -504,11 +525,41 @@ $('key').onkeydown=e=>{
   const t=tokenFor(e);
   // Modifier-only presses show progress but are not a complete chord.
   $('key').value = t ? mods.concat([t]).join('+') : mods.join('+');
-  $('hint').textContent = t ? 'Captured '+$('key').value+'.' : 'Now press the main key.';
+  if(t){ $('hint').textContent='Captured '+$('key').value+'.'; applyNow(); }
+  else  { $('hint').textContent='Now press the main key.'; }
 };
 $('key').onfocus=()=>{ $('hint').textContent='Press the keys you want bound.'; };
 
-$('type').onchange=typeChanged;
+// Applied as soon as a choice is made, rather than behind an Apply button.
+// Picking a gamepad target used to cost three clicks (Action, Target, Apply);
+// now the common case is one. Returns false when the action is not yet complete,
+// which for a key chord means no non-modifier key has been pressed.
+function applyNow(){
+  const b=cur(); if(!b) return false;
+  const t=$('type').value;
+  let a=t;
+  if(t==='GAMEPAD') a='GAMEPAD:'+$('pads').value;
+  else if(t==='KEY'){
+    const k=$('key').value.trim();
+    if(!k || /\+$/.test(k)) return false;
+    a='KEY:'+k;
+  }
+  if((t==='GAMEPAD'||t==='KEY') && $('rapid').checked) a+='|RAPID';
+  send({cmd:'set', index:b.index, action:a});
+  $('applied').textContent='Saved.';
+  setTimeout(()=>{ $('applied').textContent=''; }, 1500);
+  return true;
+}
+
+$('type').onchange=()=>{
+  typeChanged();
+  // MENU and NONE are complete on their own; GAMEPAD has a default target.
+  // KEY waits for a captured chord.
+  if($('type').value!=='KEY') applyNow();
+  else $('hint').textContent='Click the Keys box and press a shortcut.';
+};
+$('pads').onchange=applyNow;
+$('rapid').onchange=applyNow;
 $('close').onclick=()=>send({cmd:'close'});
 $('adv').onclick=()=>send({cmd:'advanced'});
 $('prof2').onchange=()=>send({cmd:'profile', profile:$('prof2').value});
@@ -519,19 +570,6 @@ $('rec').onclick=()=>{
   const b=cur(); if(!b) return;
   $('hint').textContent='Recording macro for '+b.name+'…';
   send({cmd:'macro', index:b.index});
-};
-$('apply').onclick=()=>{
-  const b=cur(); if(!b) return;
-  const t=$('type').value;
-  let a=t;
-  if(t==='GAMEPAD') a='GAMEPAD:'+$('pads').value;
-  else if(t==='KEY'){
-    const k=$('key').value.trim();
-    if(!k || /\+$/.test(k)){ $('hint').textContent='Click the Keys box and press a shortcut first.'; return; }
-    a='KEY:'+k;
-  }
-  if((t==='GAMEPAD'||t==='KEY') && $('rapid').checked) a+='|RAPID';
-  send({cmd:'set', index:b.index, action:a});
 };
 
 // Reported to the host so it lands in the log file. Without this a scripting
@@ -584,6 +622,31 @@ bool RemapWebWindow::Open(HINSTANCE hInst, const std::wstring& profileId, Callba
     m_hInst    = hInst;
     s_instance = this;
 
+    // The process is not DPI aware (the Win32 editor and macro recorder both use
+    // fixed pixel layouts and would break if it were), so Windows bitmap-stretches
+    // its windows on a scaled display — which is why this one looked blurry.
+    //
+    // Per-window awareness fixes only this window: the context is applied to
+    // whatever is created on this thread while it is set, then restored, leaving
+    // the legacy dialogs scaled as before. Resolved dynamically because
+    // mixed-mode DPI needs Windows 10 1803 or newer.
+    using SetCtxFn = DPI_AWARENESS_CONTEXT (WINAPI*)(DPI_AWARENESS_CONTEXT);
+    SetCtxFn setCtx = nullptr;
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll"))
+        setCtx = reinterpret_cast<SetCtxFn>(
+            reinterpret_cast<void*>(GetProcAddress(user32, "SetThreadDpiAwarenessContext")));
+
+    DPI_AWARENESS_CONTEXT previousCtx = nullptr;
+    if (setCtx) {
+        previousCtx = setCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        if (!previousCtx)  // V2 unavailable on this build; V1 still beats stretching
+            previousCtx = setCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+    }
+    struct CtxRestore {
+        SetCtxFn fn; DPI_AWARENESS_CONTEXT prev;
+        ~CtxRestore() { if (fn && prev) fn(prev); }
+    } restore{setCtx, previousCtx};
+
     WNDCLASSEXW wc{};
     wc.cbSize        = sizeof(wc);
     wc.lpfnWndProc   = WndProc;
@@ -597,9 +660,20 @@ bool RemapWebWindow::Open(HINSTANCE hInst, const std::wstring& profileId, Callba
     wc.hbrBackground = CreateSolidBrush(RGB(0x15, 0x20, 0x2c));
     RegisterClassExW(&wc);  // harmless if already registered
 
+    // Now that the window is DPI aware, its size is in physical pixels, so the
+    // logical dimensions have to be scaled or it appears small on a 150%+ display.
+    int width = WINDOW_W, height = WINDOW_H;
+    if (setCtx) {
+        const UINT dpi = GetDpiForSystem();
+        if (dpi > 0) {
+            width  = MulDiv(WINDOW_W, static_cast<int>(dpi), 96);
+            height = MulDiv(WINDOW_H, static_cast<int>(dpi), 96);
+        }
+    }
+
     m_hwnd = CreateWindowExW(0, CLASS_NAME, L"Remap Buttons",
                              WS_OVERLAPPEDWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, WINDOW_W, WINDOW_H,
+                             CW_USEDEFAULT, CW_USEDEFAULT, width, height,
                              nullptr, nullptr, hInst, nullptr);
     if (!m_hwnd) {
         logging::Logf("[RemapWeb] CreateWindow failed error=%lu", GetLastError());
@@ -643,7 +717,33 @@ void RemapWebWindow::ResizeWebView() {
     m_controller->put_Bounds(rc);
 }
 
+void RemapWebWindow::Prewarm(HINSTANCE hInst) {
+    if (!IsRuntimeAvailable())
+        return;
+    m_hInst = hInst;
+    EnsureEnvironmentAsync(nullptr);
+}
+
 void RemapWebWindow::CreateWebViewAsync(HWND hwnd) {
+    if (m_env) {
+        // Pre-warm already finished — skip straight to the controller, which is
+        // the fast path that makes opening the editor feel immediate.
+        CreateControllerAsync(hwnd);
+        return;
+    }
+    // Creation is in flight (or not started); remember where to attach.
+    m_pendingHwnd = hwnd;
+    EnsureEnvironmentAsync(hwnd);
+}
+
+void RemapWebWindow::EnsureEnvironmentAsync(HWND hwndOrNull) {
+    if (m_envRequested) {
+        if (hwndOrNull) m_pendingHwnd = hwndOrNull;
+        return;
+    }
+    m_envRequested = true;
+    m_pendingHwnd  = hwndOrNull;
+
     // User-data folder under LOCALAPPDATA: the default is beside the exe, which
     // fails when installed to Program Files without write access.
     const std::wstring dataDir = logging::BuildAppDataDirectory(L"NonSteamController\\WebView2");
@@ -651,14 +751,35 @@ void RemapWebWindow::CreateWebViewAsync(HWND hwnd) {
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
         nullptr, dataDir.c_str(), nullptr,
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-            [this, hwnd](HRESULT res, ICoreWebView2Environment* env) -> HRESULT {
+            [this](HRESULT res, ICoreWebView2Environment* env) -> HRESULT {
                 if (FAILED(res) || !env) {
                     logging::Logf("[RemapWeb] environment creation failed hr=0x%08lX",
                                   static_cast<unsigned long>(res));
+                    m_envRequested = false;  // allow a retry on the next Open
                     return res;
                 }
                 m_env = env;
-                return env->CreateCoreWebView2Controller(
+                logging::Logf("[RemapWeb] environment ready");
+                // Only build the controller if a window is actually waiting.
+                if (m_pendingHwnd) {
+                    HWND target = m_pendingHwnd;
+                    m_pendingHwnd = nullptr;
+                    CreateControllerAsync(target);
+                }
+                return S_OK;
+            }).Get());
+
+    if (FAILED(hr)) {
+        m_envRequested = false;
+        logging::Logf("[RemapWeb] CreateCoreWebView2EnvironmentWithOptions failed hr=0x%08lX",
+                      static_cast<unsigned long>(hr));
+    }
+}
+
+void RemapWebWindow::CreateControllerAsync(HWND hwnd) {
+    if (!m_env || !hwnd) return;
+
+    const HRESULT hr = m_env->CreateCoreWebView2Controller(
                     hwnd,
                     Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
                         [this](HRESULT res2, ICoreWebView2Controller* ctrl) -> HRESULT {
@@ -712,10 +833,9 @@ void RemapWebWindow::CreateWebViewAsync(HWND hwnd) {
                             m_webview->NavigateToString(html.c_str());
                             return S_OK;
                         }).Get());
-            }).Get());
 
     if (FAILED(hr))
-        logging::Logf("[RemapWeb] CreateCoreWebView2EnvironmentWithOptions failed hr=0x%08lX",
+        logging::Logf("[RemapWeb] CreateCoreWebView2Controller failed hr=0x%08lX",
                       static_cast<unsigned long>(hr));
 }
 

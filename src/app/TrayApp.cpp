@@ -696,6 +696,13 @@ bool TrayApp::Init(HINSTANCE hInstance) {
     }
     PublishWidgetState();
 
+    // Start WebView2 up now rather than when the editor is first opened. Creating
+    // the environment spawns the browser and GPU processes and prepares the
+    // user-data folder, which is what made the first "Remap Buttons" take several
+    // seconds. Asynchronous, so it costs nothing here.
+    m_remapWebWindow = std::make_unique<RemapWebWindow>();
+    m_remapWebWindow->Prewarm(m_hInstance);
+
     // The callback fires on the watcher thread, so marshal to the UI thread
     // before touching controller or UI state. Start() also fires once
     // immediately, which is what asserts the correct mode at startup.

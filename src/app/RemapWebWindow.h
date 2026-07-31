@@ -74,6 +74,15 @@ public:
     // can fall back to the Win32 editor instead of showing an error.
     static bool IsRuntimeAvailable();
 
+    // Starts creating the WebView2 environment ahead of time.
+    //
+    // Worth doing at startup: creating it spawns the msedgewebview2 browser and
+    // GPU processes and prepares the user-data folder, which is what made the
+    // first Open take several seconds. Doing it early moves that cost to a moment
+    // where nobody is waiting. Safe to call more than once; later calls are
+    // ignored while one is in flight or already finished.
+    void Prewarm(HINSTANCE hInst);
+
     // Opens, or re-focuses if already open. Returns false if the window could
     // not be created, in which case the caller should use the fallback editor.
     bool Open(HINSTANCE hInst, const std::wstring& profileId, Callbacks cb);
@@ -90,6 +99,10 @@ private:
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
     void CreateWebViewAsync(HWND hwnd);
+    // Kicks off environment creation. hwnd may be null, in which case the
+    // controller is not created yet — that is the pre-warm path.
+    void EnsureEnvironmentAsync(HWND hwndOrNull);
+    void CreateControllerAsync(HWND hwnd);
     void OnWebMessage(const std::wstring& json);
     void PostState();
     void ResizeWebView();
@@ -98,6 +111,11 @@ private:
     HINSTANCE  m_hInst = nullptr;
     std::wstring m_profileId;
     Callbacks    m_cb;
+
+    bool m_envRequested = false;   // environment creation started
+    // Set when Open() ran before the pre-warmed environment arrived, so the
+    // completion handler knows to continue into controller creation.
+    HWND m_pendingHwnd  = nullptr;
 
     Microsoft::WRL::ComPtr<ICoreWebView2Environment> m_env;
     Microsoft::WRL::ComPtr<ICoreWebView2Controller>  m_controller;
