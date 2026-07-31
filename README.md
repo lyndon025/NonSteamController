@@ -119,6 +119,32 @@ For reliable Xbox Mode startup, Windows Startup Apps should be set to **System s
 - Xbox Game Bar, if you want the widget
 - Administrator rights during install, because `usbip-win2` and the desktop app install into system locations
 
+Steam does **not** need to be closed, and no Steam-side setting needs changing.
+While emulating, the app takes exclusive write access to the controller, so Steam
+Input cannot drive it at the same time; when it yields it hands write access back.
+
+## Automatic control
+
+The tray menu's **Automatic control** submenu decides who owns the controller:
+
+| Mode | Behaviour |
+|---|---|
+| Manual | Only the tray toggle switches emulation on and off. |
+| Off while Steam is running | Yields the controller whenever `steam.exe` is running. |
+| Off only while a game is running | Keeps the controller while Steam idles, and yields only for a running Steam game so Steam Input can take over. |
+
+The last mode is the useful one if you want your own bindings on the desktop but
+Steam Input's per-game configurations inside Steam games.
+
+A game starting or stopping is detected from a registry watch on
+`HKCU\Software\Valve\Steam`, so handover happens in milliseconds. Taking the
+controller back is deliberately debounced by a few consecutive samples, so a game
+relaunching or Steam restarting cannot cause ownership to flap.
+
+Games launched outside Steam intentionally do **not** trigger a yield: there is no
+Steam Input to hand the controller to, so releasing it would leave the game with
+no controller at all.
+
 ## Supported controller path
 
 - Wired Steam Controller
