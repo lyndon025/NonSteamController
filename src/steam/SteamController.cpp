@@ -149,10 +149,13 @@ std::vector<SteamController::Candidate> SteamController::EnumerateCandidates() {
                 continue;
             }
 
-            // Identity is carried for the caller's benefit — it gives a slot a
-            // stable handle across reconnects — not used for filtering here.
-            candidates.push_back(
-                Candidate{path, DeviceIdentity::GetPhysicalDeviceKey(path), pid, wired});
+            // physicalKey deliberately left empty. Computing it here cost a
+            // CM_Get_Device_Interface_Property pair plus a CreateFileW for every
+            // candidate, on every sweep — and this runs from the reconnect timer
+            // on the UI thread, where it showed up as lag opening the tray menu.
+            // Nothing consumes the key yet; callers that need identity can ask
+            // DeviceIdentity directly for the one path they care about.
+            candidates.push_back(Candidate{path, std::wstring(), pid, wired});
         }
     }
 
@@ -196,30 +199,21 @@ bool SteamController::Open(const Candidate& candidate) {
 bool SteamController::Open() {
     logging::Logf("[SteamController] Open begin");
 
-    // A silent interface stays silent until something changes, so re-probing it
-    // every retry only burns the probe timeout. Skipping it for a while keeps the
-    // disconnected retry loop cheap; ClearProbeCooldowns() on device arrival is
-    // what guarantees a freshly woken controller is still found at once.
-    constexpr unsigned long long kProbeCooldownMs = 10000;
-    const unsigned long long now = GetTickCount64();
-
-    int skipped = 0;
+    // Every candidate is probed on every attempt, deliberately.
+    //
+    // There used to be a per-path cooldown here to keep this loop cheap, but it
+    // could only ever delay detection: a controller that was asleep when first
+    // probed stayed unreachable until the cooldown expired. The cost it existed
+    // to avoid is now handled by sweeping far less often (see
+    // RECONNECT_BACKOFF_MS) and by not doing identity lookups per candidate, so
+    // one mechanism replaces two that interacted badly.
     for (const auto& candidate : EnumerateCandidates()) {
-        const auto it = m_probeCooldownUntilMs.find(candidate.path);
-        if (it != m_probeCooldownUntilMs.end() && now < it->second) {
-            ++skipped;
-            continue;
-        }
-
-        if (Open(candidate)) {
-            m_probeCooldownUntilMs.clear();
+        if (Open(candidate))
             return true;
-        }
-        m_probeCooldownUntilMs[candidate.path] = now + kProbeCooldownMs;
     }
 
-    logging::Logf("[SteamController] Open failed (wired PID=%04X, dongle PID=%04X, %d on cooldown)",
-                  SC2026_PID, SC2026_DONGLE_PID, skipped);
+    logging::Logf("[SteamController] Open failed (no live interface; wired PID=%04X, dongle PID=%04X)",
+                  SC2026_PID, SC2026_DONGLE_PID);
     return false;
 }
 

@@ -112,6 +112,11 @@ private:
     static constexpr UINT TIMER_SMAPI_WATCH = 3;
     static constexpr UINT SMAPI_WATCH_MS    = 250;
     static constexpr ULONGLONG SMAPI_REINIT_GRACE_MS = 10000;
-    static constexpr UINT RECONNECT_BACKOFF_MS  = 3000;
+    // How long to wait between discovery sweeps while no controller is open.
+    // A sweep opens every HID device on the system to read its attributes, which
+    // is slow and runs on the UI thread, so doing it every 3s made the tray menu
+    // sluggish. WM_DEVICECHANGE arrival is the real signal for a controller being
+    // plugged in; this is only a fallback for an arrival we never saw.
+    static constexpr UINT RECONNECT_BACKOFF_MS  = 10000;
     static constexpr ULONGLONG GAME_ACTIVE_GRACE_MS  = 30000;
 };
