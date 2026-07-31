@@ -859,16 +859,15 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // first open attempt can race HID initialization, and there may be
             // no later arrival event if the controller was already present.
             //
-            // Gated on may-own: while an auto mode is yielding, ReleaseDevices
-            // has left us disconnected, so an ungated retry would reopen the
-            // device and ApplySteamState would immediately close it again —
-            // open/close churn every RECONNECT_BACKOFF_MS for the whole game
-            // session, right when we are supposed to be staying out of the way.
+            // No longer gated on whether we want control. Yielding now keeps the
+            // device open in shared mode rather than closing it, so there is no
+            // close/reopen churn to guard against — and gating it meant that in
+            // "off while Steam is running" mode the controller was never opened
+            // at all, leaving the tray reporting no controller and the enable
+            // toggle permanently greyed out.
             const ULONGLONG now = GetTickCount64();
-            const bool mayOwn = (m_autoMode == AutoMode::Manual) || WantControl(m_steamState);
-            if (mayOwn &&
-                (m_controller->IsConnected() ||
-                 (now - m_lastReconnectAttemptTick) >= RECONNECT_BACKOFF_MS)) {
+            if (m_controller->IsConnected() ||
+                (now - m_lastReconnectAttemptTick) >= RECONNECT_BACKOFF_MS) {
                 m_lastReconnectAttemptTick = now;
                 m_controller->OnDeviceChange();
                 ReconcileAutoMode();
@@ -1046,6 +1045,11 @@ void TrayApp::SetAutoMode(AutoMode mode) {
     m_autoMode = mode;
     logging::Logf("[Auto] mode -> %d", static_cast<int>(m_autoMode));
     SaveSettings();
+    // Refresh connection state immediately on any mode change, including to
+    // Manual — ApplySteamState returns early for Manual, so without this the
+    // menu would keep showing stale connected/greyed state until the next tick.
+    if (m_controller)
+        m_controller->OnDeviceChange();
     if (mode != AutoMode::Manual)
         ApplySteamState(m_steamWatcher.GetState());
 }
@@ -1071,11 +1075,17 @@ void TrayApp::ApplySteamState(SteamState state) {
         return;
     }
 
-    // Yield properly. DisableGameMode on its own only restores lizard mode and
-    // keeps our exclusive handle, which would leave Steam Input staring at a
-    // busy device — ReleaseDevices closes the handle too.
-    if (m_controller->IsConnected() || m_controller->IsGameModeActive())
-        m_controller->ReleaseDevices();
+    // Yield by dropping to shared access, not by closing the device.
+    //
+    // DisableGameMode restores lizard mode and hands write access back (see
+    // ReleaseExclusiveIfHeld), which is all Steam Input needs — this is exactly
+    // SteamlessController's model: shared while idle, exclusive only while
+    // emulating. Closing the handle instead, as this used to, had two bad
+    // consequences: the controller then read as disconnected, so the tray said
+    // "No controller found" and the enable toggle greyed out; and the reconnect
+    // timer had to be gated to stop it reopening what had just been closed,
+    // which starved connection entirely in this mode.
+    m_controller->DisableGameMode();
 }
 
 // Kept as the single "re-evaluate everything" entry point that the device,
