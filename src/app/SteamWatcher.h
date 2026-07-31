@@ -17,8 +17,14 @@ enum class SteamState {
     InGame    = 2,  // Steam running a game
 };
 
-// Watches the Steam process and its RunningAppID registry value, reporting
-// debounced state transitions from a 2-second polling thread.
+// Watches Steam and reports debounced state transitions from a background
+// thread.
+//
+// The wait is interruptible by a registry-change notification on
+// HKCU\Software\Valve\Steam, so a game starting or exiting is normally seen
+// within milliseconds instead of on the next poll tick. Polling remains as a
+// safety net for the things a registry watch cannot see (Steam being killed,
+// and games launched outside Steam).
 class SteamWatcher {
 public:
     using SteamStateFn = std::function<void(SteamState)>;
